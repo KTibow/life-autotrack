@@ -1,12 +1,12 @@
 /**
- * `pnpm google:login`: start (or find) the Chromium on CHROMIUM_PROFILE_DIR and check that
- * it's signed in to Google. If not, its window is showing the sign-in page: sign in there
- * (2FA included), then run this again to confirm.
+ * `pnpm google:login`: open the Chromium profile in a window and make sure it's signed in
+ * to Google. If it isn't, sign in there (2FA included); this waits, checks Drive works,
+ * and closes the window. Needs someone at the machine's screen.
  */
 
 import { connectGoogle } from "../lib/google/browser.ts";
 
-const c = await connectGoogle();
+const c = await connectGoogle({ interactive: true });
 if (c.state === "unconfigured") {
 	console.log(
 		"Set CHROMIUM_PROFILE_DIR in .env first (a directory for a Chromium profile used only by life-autotrack).",
@@ -19,8 +19,7 @@ if (c.state === "failed") {
 }
 if (c.state === "signed-out") {
 	console.log(
-		"Not signed in yet. The Chromium window on this machine's screen is showing Google's sign-in page:\n" +
-			"sign in there with the account whose Drive files you want (2FA included), then run `pnpm google:login` again.",
+		"Still not signed in after 15 minutes; the window was closed. Run `pnpm google:login` again when you're at the screen.",
 	);
 	process.exit(1);
 }
@@ -28,10 +27,10 @@ const res = await c.google.fetch("https://drive.google.com/drive/my-drive");
 await res?.body?.cancel();
 if (!res) {
 	console.log(
-		"Almost: the browser is signed in, but Drive still asks for a sign-in. Finish it in the Chromium window, then run this again.",
+		"The browser is signed in, but Drive still asks for a sign-in with this session. Run `pnpm google:login` again; if it keeps happening, paste the output.",
 	);
 	process.exit(1);
 }
 console.log(
-	"Signed in. Drive works with this session; runs will pick it up from here. Leave the Chromium window open.",
+	"Signed in, and Drive works with this session. Tracker runs will use it from here (headless, no window).",
 );

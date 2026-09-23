@@ -7,7 +7,8 @@
  * - Google-native files (Docs, Sheets, Slides, Drawings) change in place, so they're
  *   re-exported when the folder listing says they changed since our last check, or every
  *   DRIVE_RECHECK_HOURS otherwise. The last check is the symlink's own mtime: local cache
- *   state that never reaches git. Unchanged exports are byte-identical, so no diff.
+ *   state that never reaches git. A re-export whose content matches the archived copy
+ *   (ignoring Office packing noise, see officeFingerprint) changes nothing.
  * - with no Google session, or on an error, whatever was archived before is kept as is
  */
 
@@ -18,7 +19,15 @@ import type { Files } from "../files.ts";
 import { log, logWarn, stats } from "../log.ts";
 import { namer, type Namer, type Store } from "../store.ts";
 import type { Google } from "./browser.ts";
-import { downloadDrive, EXT, isNative, listFolder, type DriveRef, type FolderEntry } from "./drive.ts";
+import {
+	downloadDrive,
+	EXT,
+	isNative,
+	listFolder,
+	officeFingerprint,
+	type DriveRef,
+	type FolderEntry,
+} from "./drive.ts";
 
 const RECHECK_MS = Number(optional("DRIVE_RECHECK_HOURS") ?? 12) * 3600_000;
 const MAX_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
@@ -89,6 +98,16 @@ const syncFile = async (
 	const final = dot > 0 ? name(got.name.slice(0, dot), got.name.slice(dot)) : name(got.name);
 	const rel = `${dir}/${final}`;
 	const before = await store.readLinkTarget(rel);
+	// Office exports aren't byte-stable (Slides renumbers images every time): if the content
+	// matches what's archived, keep the archived copy so nothing changes
+	if (before && (ref.kind === "spreadsheets" || ref.kind === "presentation")) {
+		const old = await store.readBlob(before);
+		if (old && officeFingerprint(old) === officeFingerprint(got.bytes)) {
+			await store.link(rel, before);
+			await markChecked(store, rel);
+			return final;
+		}
+	}
 	const blob = await store.blob(got.bytes);
 	await store.link(rel, blob);
 	if (before !== blob.sha256) {

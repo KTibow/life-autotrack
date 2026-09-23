@@ -1,8 +1,8 @@
 /**
  * Google Drive through a browser session (see browser.ts), without the Drive API:
  *
- * - Google-native files are exported: Docs → .md (diffable), Sheets → .xlsx, Slides → .pdf,
- *   Drawings → .png. Forms have no export and are skipped.
+ * - Google-native files are exported: Docs → .md (diffable), Sheets → .xlsx, Slides → .pptx
+ *   (keeps speaker notes), Drawings → .png. Forms have no export and are skipped.
  * - Uploaded files come from drive.usercontent.google.com (confirm=t skips the virus-scan
  *   interstitial on big files).
  * - Folders are listed with embeddedfolderview (ids, types, titles, modified dates).
@@ -11,6 +11,8 @@
  *   an unchanged file exports to identical bytes and makes no diff.
  */
 
+import { createHash } from "node:crypto";
+import { inflateRawSync } from "node:zlib";
 import type { Google } from "./browser.ts";
 
 export type DriveKind =
@@ -52,14 +54,14 @@ export const driveLinksIn = (html: string | undefined): string[] =>
 const EXPORTS: Partial<Record<DriveKind, (id: string) => string>> = {
 	document: (id) => `https://docs.google.com/document/d/${id}/export?format=md`,
 	spreadsheets: (id) => `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`,
-	presentation: (id) => `https://docs.google.com/presentation/d/${id}/export/pdf`,
+	presentation: (id) => `https://docs.google.com/presentation/d/${id}/export/pptx`,
 	drawings: (id) => `https://docs.google.com/drawings/d/${id}/export/png`,
 	file: (id) => `https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t`,
 };
 export const EXT: Partial<Record<DriveKind, string>> = {
 	document: ".md",
 	spreadsheets: ".xlsx",
-	presentation: ".pdf",
+	presentation: ".pptx",
 	drawings: ".png",
 };
 /** Google-native kinds change in place, so they're re-exported; uploads are fetched once */
@@ -94,6 +96,83 @@ export const normalizeZip = (bytes: Uint8Array): Uint8Array => {
 	return buf;
 };
 
+/** a zip's entries as name → bytes (stored or deflated entries; enough for Office files) */
+const readZip = (bytes: Uint8Array): Map<string, Buffer> | null => {
+	const buf = Buffer.from(bytes);
+	let eocd = -1;
+	for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--)
+		if (buf.readUInt32LE(i) === 0x06054b50) {
+			eocd = i;
+			break;
+		}
+	if (eocd < 0) return null;
+	const out = new Map<string, Buffer>();
+	let p = buf.readUInt32LE(eocd + 16);
+	for (let n = buf.readUInt16LE(eocd + 10); n > 0; n--) {
+		if (buf.readUInt32LE(p) !== 0x02014b50) return null;
+		const method = buf.readUInt16LE(p + 10);
+		const size = buf.readUInt32LE(p + 20);
+		const nameLen = buf.readUInt16LE(p + 28);
+		const name = buf.toString("utf8", p + 46, p + 46 + nameLen);
+		const local = buf.readUInt32LE(p + 42);
+		const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+		const raw = buf.subarray(start, start + size);
+		if (method === 0) out.set(name, raw);
+		else if (method === 8) out.set(name, inflateRawSync(raw));
+		else return null;
+		p += 46 + nameLen + buf.readUInt16LE(p + 30) + buf.readUInt16LE(p + 32);
+	}
+	return out;
+};
+
+/**
+ * A fingerprint of an Office file's content that ignores how the export happened to be
+ * packed: entry order, timestamps, and the arbitrary numbering of interchangeable parts
+ * (Slides numbers a deck's images and themes differently on every export). Those parts
+ * are named by their content hash, references to them rewritten, and everything is then
+ * hashed in name order.
+ */
+export const officeFingerprint = (bytes: Uint8Array): string | null => {
+	const entries = readZip(bytes);
+	if (!entries) return null;
+	const sha = (data: Buffer) => `sha-${createHash("sha256").update(data).digest("hex")}`;
+	const renamed = new Map<string, string>(); // "media/image3.png" → "media/sha-…"
+	const rewrite = (data: Buffer) =>
+		Buffer.from(data.toString("utf8").replace(/(media|theme)\/([^"'<>\s/]+)/g, (m) => renamed.get(m) ?? m));
+	// media first (leaves), then themes (which can point at media via their _rels)
+	for (const kind of ["media", "theme"])
+		for (const [name, data] of entries) {
+			const m = new RegExp(`(?:^|/)(${kind}/[^/]+)$`).exec(name);
+			if (!m) continue;
+			const rels = entries.get(name.replace(/([^/]+)$/, "_rels/$1.rels"));
+			renamed.set(
+				m[1],
+				`${kind}/${sha(Buffer.concat([rewrite(data), rels ? rewrite(rels) : Buffer.alloc(0)]))}`,
+			);
+		}
+	const canonical = [...entries].map(([name, data]): [string, Buffer] => {
+		const renamedName = name.replace(
+			/(media|theme)\/(_rels\/)?([^/]+?)(\.rels)?$/,
+			(m, kind, relsDir, file, relsExt) => {
+				const to = renamed.get(`${kind}/${file}`);
+				return to ? `${to.replace(/^[^/]+\//, `${kind}/${relsDir ?? ""}`)}${relsExt ?? ""}` : m;
+			},
+		);
+		if (!/\.(xml|rels)$/.test(name)) return [renamedName, data];
+		let text = rewrite(data).toString("utf8");
+		// manifests list parts in whatever order they were numbered: order doesn't matter there
+		if (name === "[Content_Types].xml" || name.endsWith(".rels"))
+			text = text.replace(/((?:<(?:Default|Override|Relationship)\b[^>]*\/>)+)/g, (run) =>
+				(run.match(/<[^>]+\/>/g) ?? []).sort().join(""),
+			);
+		return [renamedName, Buffer.from(text)];
+	});
+	const hash = createHash("sha256");
+	for (const [name, data] of canonical.sort(([a], [b]) => (a < b ? -1 : 1)))
+		hash.update(name).update("\0").update(data);
+	return hash.digest("hex");
+};
+
 /**
  * The file's bytes and Drive title, or null when this account can't see it (not shared,
  * deleted) or there's nothing to download (Forms).
@@ -121,7 +200,7 @@ export const downloadDrive = async (
 		return null;
 	}
 	let bytes: Uint8Array = new Uint8Array(await res.arrayBuffer());
-	if (ref.kind === "spreadsheets") bytes = normalizeZip(bytes);
+	if (ref.kind === "spreadsheets" || ref.kind === "presentation") bytes = normalizeZip(bytes);
 	const name = filenameOf(res) ?? `${ref.id}${EXT[ref.kind] ?? ""}`;
 	return { name, bytes };
 };

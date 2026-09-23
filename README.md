@@ -84,12 +84,14 @@ and 1 more · +0 ~1 -0`, with the full change list in the body.
 
 Links to Drive in Schoology (attached, or in an item's text) are followed and archived
 next to the item, named as they're named in Drive. There's no OAuth app: requests use the
-cookies of a real Chromium running on a profile of its own (`CHROMIUM_PROFILE_DIR`).
+cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
 
-- `pnpm google:login` starts that browser in a window. Sign in there (2FA and all).
-  The browser stays open between runs, which keeps Google's cookies fresh; if it ever
-  gets signed out, runs skip Drive, keep what's archived, and reopen the sign-in page,
-  so plugging in a monitor and signing in is the whole fix.
+- `pnpm google:login` opens that profile in a window on the machine's screen (found
+  automatically over SSH). Sign in there, 2FA and all; it waits, checks Drive works,
+  and closes.
+- Tracker runs start it headless, let it load Drive so Google refreshes the session
+  into the profile, take the cookies, and close it; no display needed. If the session
+  ever lapses, runs skip Drive, keep what's archived, and say to run `google:login`.
 - The profile runs with `--password-store=basic`, so it doesn't depend on a desktop
   keyring and can be signed in on one machine and copied to another.
 - Docs → `.md`, Sheets → `.xlsx`, Slides → `.pdf`, Drawings → `.png`, uploads as

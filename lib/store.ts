@@ -169,6 +169,11 @@ export class Store {
 		return true;
 	}
 
+	/** a blob's bytes by sha256, if it's on disk */
+	async readBlob(sha256: string): Promise<Buffer | null> {
+		return readFile(join(this.life, "blobs", sha256.slice(0, 2), sha256)).catch(() => null);
+	}
+
 	/** the blob sha256 a scope-relative symlink points at, if any */
 	async readLinkTarget(rel: string): Promise<string | null> {
 		const target = await readlink(this.abs(rel)).catch(() => null);

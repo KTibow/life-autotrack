@@ -9,10 +9,11 @@
  * - CHROMIUM_COMMAND is how to start it: `chromium` (default) or, e.g.,
  *   `flatpak run org.chromium.Chromium` (then the profile dir must be one the sandbox can
  *   see, e.g. under ~/.var/app/org.chromium.Chromium/).
- * - The browser runs headed and is left open between runs: that keeps Google's rotating
- *   cookies fresh and gives 2FA prompts somewhere to appear. From cron, set DISPLAY (or
- *   WAYLAND_DISPLAY) in .env.
- * - We only read cookies over the DevTools protocol; all requests are plain fetch().
+ * - Tracker runs start it headless (no display needed), let it load Drive so Google can
+ *   refresh the session's rotating cookies into the profile, read the cookies over the
+ *   DevTools protocol, and close it. All requests are then plain fetch().
+ * - Only `pnpm google:login` opens a window: sign-in and 2FA happen there, then it closes.
+ * - A Chromium already running on the profile (you opened it) is borrowed, never closed.
  */
 
 import { spawn } from "node:child_process";
@@ -21,7 +22,7 @@ import { closeSync, openSync } from "node:fs";
 import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { optional } from "../env.ts";
+import { optional, pathEnv } from "../env.ts";
 import { sleep } from "../http.ts";
 import { log, logWarn, stats } from "../log.ts";
 
@@ -97,14 +98,14 @@ const desktopEnv = async (): Promise<Record<string, string>> => {
 	return env;
 };
 
-const launch = async (profile: string): Promise<string> => {
+const launch = async (profile: string, headed: boolean): Promise<string> => {
 	await mkdir(profile, { recursive: true });
 	await rm(join(profile, "DevToolsActivePort"), { force: true });
 	const [cmd, ...args] = (optional("CHROMIUM_COMMAND") ?? "chromium").split(/\s+/);
 	// Chromium's own output goes here, so a failed start can say why
 	const logFile = join(profile, "life-autotrack-chromium.log");
 	const out = openSync(logFile, "w");
-	const desktop = await desktopEnv();
+	const desktop = headed ? await desktopEnv() : {};
 	log(
 		`  starting Chromium (${cmd}) on ${profile}` +
 			(Object.keys(desktop).length
@@ -122,8 +123,8 @@ const launch = async (profile: string): Promise<string> => {
 			"--password-store=basic",
 			"--no-first-run",
 			"--no-default-browser-check",
-			// use Wayland when the session has it, X11 otherwise
-			"--ozone-platform-hint=auto",
+			// headed: use Wayland when the session has it, X11 otherwise
+			...(headed ? ["--ozone-platform-hint=auto"] : ["--headless=new"]),
 			"https://drive.google.com/",
 		],
 		{ detached: true, stdio: ["ignore", out, out], env: { ...process.env, ...desktop } },
@@ -132,7 +133,7 @@ const launch = async (profile: string): Promise<string> => {
 	let exited: string | undefined;
 	child.on("error", (e) => (exited = `could not run "${cmd}": ${e.message}`));
 	child.on("exit", (code, signal) => (exited = `exited right away (${signal ?? `code ${code}`})`));
-	child.unref(); // left running on purpose: see the header comment
+	child.unref(); // closed over DevTools (Browser.close) once we're done with it
 	for (let i = 0; i < 60 && !exited; i++) {
 		await sleep(500);
 		const ws = await running(profile);
@@ -145,7 +146,8 @@ const launch = async (profile: string): Promise<string> => {
 		.slice(-6)
 		.join("\n    ");
 	const hints = [
-		!process.env.DISPLAY &&
+		headed &&
+			!process.env.DISPLAY &&
 			!process.env.WAYLAND_DISPLAY &&
 			!desktop.DISPLAY &&
 			!desktop.WAYLAND_DISPLAY &&
@@ -183,45 +185,79 @@ const cookieHeader = (cookies: Cookie[], url: URL) =>
 		.map((c) => `${c.name}=${c.value}`)
 		.join("; ");
 
-/**
- * Connect to (or start) the profile's Chromium and return a signed-in session, or null
- * (with a log line saying why) so callers skip Google work and keep what they have.
- */
 export type Connection =
 	| { state: "ready"; google: Google }
 	| { state: "unconfigured" }
 	| { state: "signed-out"; profile: string }
 	| { state: "failed"; error: string };
 
+const signedIn = (cookies: Cookie[]) =>
+	cookies.some((c) => ["SID", "__Secure-1PSID"].includes(c.name) && c.domain.endsWith("google.com"));
+const pageUrls = async (browser: Awaited<ReturnType<typeof cdp>>): Promise<string[]> =>
+	(await browser.send("Target.getTargets")).targetInfos
+		.filter((t: any) => t.type === "page")
+		.map((t: any) => String(t.url));
+const onDrive = (urls: string[]) => urls.some((u) => u.startsWith("https://drive.google.com/"));
+const onSignIn = (urls: string[]) => urls.some((u) => u.startsWith("https://accounts.google.com/"));
+
 /**
- * Connect to (or start) the profile's Chromium. Signed out → the sign-in page is open in
- * its window. Says what happened and leaves the wording to the caller.
+ * Get the profile's Google cookies. Starts Chromium if it isn't running (headless unless
+ * `interactive`), waits for its Drive tab to settle so the session gets refreshed, and
+ * closes it again if we started it. `interactive` (google:login) opens a window and, when
+ * signed out, waits for a person to sign in there.
  */
-export const connectGoogle = async (): Promise<Connection> => {
-	const profile = optional("CHROMIUM_PROFILE_DIR");
+export const connectGoogle = async ({ interactive = false } = {}): Promise<Connection> => {
+	const profile = pathEnv("CHROMIUM_PROFILE_DIR");
 	if (!profile) return { state: "unconfigured" };
-	let cookies: Cookie[];
+	const headed = interactive || optional("CHROMIUM_HEADLESS") === "0";
+	let browser: Awaited<ReturnType<typeof cdp>> | undefined;
+	let started = false;
 	try {
-		const browser = await cdp((await running(profile)) ?? (await launch(profile)));
-		try {
-			cookies = (await browser.send("Storage.getCookies")).cookies;
-			const signedIn = cookies.some(
-				(c) => ["SID", "__Secure-1PSID"].includes(c.name) && c.domain.endsWith("google.com"),
-			);
-			if (!signedIn) {
-				const { targetInfos } = await browser.send("Target.getTargets");
-				// a fresh launch's own tab (drive.google.com) is already on its way to the sign-in page
-				if (!targetInfos.some((t: any) => /^https:\/\/(accounts|drive)\.google\.com/.test(String(t.url))))
-					await browser.send("Target.createTarget", { url: SIGN_IN });
-				return { state: "signed-out", profile };
-			}
-		} finally {
-			browser.close();
+		let ws = await running(profile);
+		if (!ws) {
+			ws = await launch(profile, headed);
+			started = true;
 		}
+		browser = await cdp(ws);
+		let cookies: Cookie[] = (await browser.send("Storage.getCookies")).cookies;
+		if (started) {
+			// let the Drive tab load: it either lands on Drive (session refreshed) or on sign-in
+			for (let i = 0; i < 40; i++) {
+				const urls = await pageUrls(browser);
+				cookies = (await browser.send("Storage.getCookies")).cookies;
+				if ((signedIn(cookies) && onDrive(urls)) || onSignIn(urls)) break;
+				await sleep(500);
+			}
+		}
+		if (!signedIn(cookies) || (started && onSignIn(await pageUrls(browser)))) {
+			if (!interactive) return { state: "signed-out", profile };
+			if (!onSignIn(await pageUrls(browser))) await browser.send("Target.createTarget", { url: SIGN_IN });
+			log(
+				"  waiting for you to sign in to Google in the Chromium window (up to 15 minutes, Ctrl-C to stop)…",
+			);
+			// Ctrl-C shouldn't leave the window behind
+			const b = browser;
+			const stop = () => void b.send("Browser.close").finally(() => process.exit(130));
+			process.once("SIGINT", stop);
+			const deadline = Date.now() + 15 * 60_000;
+			while (Date.now() < deadline) {
+				await sleep(2000);
+				cookies = (await browser.send("Storage.getCookies")).cookies;
+				if (signedIn(cookies)) break;
+			}
+			process.off("SIGINT", stop);
+			if (!signedIn(cookies)) return { state: "signed-out", profile };
+			await sleep(2000); // let the post-sign-in redirects finish setting cookies
+			cookies = (await browser.send("Storage.getCookies")).cookies;
+		}
+		return { state: "ready", google: session(cookies) };
 	} catch (e) {
 		return { state: "failed", error: (e as Error).message };
+	} finally {
+		// graceful close flushes the refreshed cookies to the profile on disk
+		if (browser && started) await browser.send("Browser.close").catch(() => {});
+		browser?.close();
 	}
-	return { state: "ready", google: session(cookies) };
 };
 
 /** for trackers: a session, or null with a log line saying Drive is skipped this run */
@@ -234,7 +270,7 @@ export const openGoogle = async (): Promise<Google | null> => {
 	if (c.state === "unconfigured") log("  Google: CHROMIUM_PROFILE_DIR not set, skipping Drive links");
 	else if (c.state === "signed-out")
 		logWarn(
-			`Google: not signed in, skipping Drive this run. Sign in in the Chromium window, or run pnpm google:login`,
+			`Google: not signed in, skipping Drive this run. Run \`pnpm google:login\` on the machine to sign in`,
 		);
 	else logWarn(`Google: skipping Drive this run: ${c.error}`);
 	return null;

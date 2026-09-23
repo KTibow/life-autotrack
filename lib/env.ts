@@ -4,6 +4,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,7 +13,18 @@ export const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const envFile = resolve(ROOT, ".env");
 if (existsSync(envFile)) process.loadEnvFile(envFile);
 
-export const LIFE_DIR = resolve(ROOT, process.env.LIFE_DIR || "../life");
+/**
+ * A path from the environment: `~` expanded (.env files don't do it, and an unexpanded
+ * `~/x` would quietly create a directory literally named `~`), relative paths resolved
+ * against this repo rather than wherever the command happened to run.
+ */
+export const pathEnv = (name: string, fallback?: string): string | undefined => {
+	const raw = process.env[name] || fallback;
+	if (!raw) return undefined;
+	return resolve(ROOT, raw.replace(/^~(?=$|\/)/, homedir()));
+};
+
+export const LIFE_DIR = pathEnv("LIFE_DIR", "../life")!;
 
 /** read a required env var, failing with a message that names it (never its value) */
 export const need = (name: string): string => {
