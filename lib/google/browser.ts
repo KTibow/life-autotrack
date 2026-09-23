@@ -187,12 +187,19 @@ const cookieHeader = (cookies: Cookie[], url: URL) =>
  * Connect to (or start) the profile's Chromium and return a signed-in session, or null
  * (with a log line saying why) so callers skip Google work and keep what they have.
  */
-export const openGoogle = async (): Promise<Google | null> => {
+export type Connection =
+	| { state: "ready"; google: Google }
+	| { state: "unconfigured" }
+	| { state: "signed-out"; profile: string }
+	| { state: "failed"; error: string };
+
+/**
+ * Connect to (or start) the profile's Chromium. Signed out → the sign-in page is open in
+ * its window. Says what happened and leaves the wording to the caller.
+ */
+export const connectGoogle = async (): Promise<Connection> => {
 	const profile = optional("CHROMIUM_PROFILE_DIR");
-	if (!profile) {
-		log("  Google: CHROMIUM_PROFILE_DIR not set, skipping Drive links");
-		return null;
-	}
+	if (!profile) return { state: "unconfigured" };
 	let cookies: Cookie[];
 	try {
 		const browser = await cdp((await running(profile)) ?? (await launch(profile)));
@@ -206,69 +213,81 @@ export const openGoogle = async (): Promise<Google | null> => {
 				// a fresh launch's own tab (drive.google.com) is already on its way to the sign-in page
 				if (!targetInfos.some((t: any) => /^https:\/\/(accounts|drive)\.google\.com/.test(String(t.url))))
 					await browser.send("Target.createTarget", { url: SIGN_IN });
-				logWarn(
-					`Google: not signed in. Sign in in the Chromium window (${profile}); skipping Drive this run`,
-				);
-				return null;
+				return { state: "signed-out", profile };
 			}
 		} finally {
 			browser.close();
 		}
 	} catch (e) {
-		logWarn(`Google: skipping Drive this run: ${(e as Error).message}`);
-		return null;
+		return { state: "failed", error: (e as Error).message };
 	}
-	log("  Google: session ready");
+	return { state: "ready", google: session(cookies) };
+};
 
-	return {
-		fetch: async (start, init = {}) => {
-			let url = new URL(start);
-			for (let hop = 0; hop < 12; hop++) {
-				stats.requests++;
-				const res = await fetch(url, {
-					redirect: "manual",
-					headers: { cookie: cookieHeader(cookies, url), ...(init.accept && { accept: init.accept }) },
-					signal: AbortSignal.timeout(10 * 60_000),
-				});
-				// services hand out their own cookies (e.g. Drive's OSID) along redirect chains
-				for (const line of res.headers.getSetCookie()) setCookie(cookies, line, url);
-				const location = res.headers.get("location");
-				if (res.status >= 300 && res.status < 400 && location) {
-					await res.body?.cancel();
-					url = new URL(location, url);
+/** for trackers: a session, or null with a log line saying Drive is skipped this run */
+export const openGoogle = async (): Promise<Google | null> => {
+	const c = await connectGoogle();
+	if (c.state === "ready") {
+		log("  Google: session ready");
+		return c.google;
+	}
+	if (c.state === "unconfigured") log("  Google: CHROMIUM_PROFILE_DIR not set, skipping Drive links");
+	else if (c.state === "signed-out")
+		logWarn(
+			`Google: not signed in, skipping Drive this run. Sign in in the Chromium window, or run pnpm google:login`,
+		);
+	else logWarn(`Google: skipping Drive this run: ${c.error}`);
+	return null;
+};
+
+const session = (cookies: Cookie[]): Google => ({
+	fetch: async (start, init = {}) => {
+		let url = new URL(start);
+		for (let hop = 0; hop < 12; hop++) {
+			stats.requests++;
+			const res = await fetch(url, {
+				redirect: "manual",
+				headers: { cookie: cookieHeader(cookies, url), ...(init.accept && { accept: init.accept }) },
+				signal: AbortSignal.timeout(10 * 60_000),
+			});
+			// services hand out their own cookies (e.g. Drive's OSID) along redirect chains
+			for (const line of res.headers.getSetCookie()) setCookie(cookies, line, url);
+			const location = res.headers.get("location");
+			if (res.status >= 300 && res.status < 400 && location) {
+				await res.body?.cancel();
+				url = new URL(location, url);
+				continue;
+			}
+			const type = res.headers.get("content-type") ?? "";
+			if (
+				type.startsWith("text/html") &&
+				(url.hostname === "accounts.google.com" || Number(res.headers.get("content-length") || 0) < 4096)
+			) {
+				const html = await res.text();
+				// Drive's "Redirecting..." page: a JS redirect, usually a passive sign-in hop
+				const next = /<title>Redirecting\.\.\.<\/title>[\s\S]*?var url = '([^']+)'/.exec(html)?.[1];
+				if (next) {
+					url = new URL(
+						next
+							.replace(/\\x([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+							.replace(/\\\//g, "/"),
+					);
 					continue;
 				}
-				const type = res.headers.get("content-type") ?? "";
-				if (
-					type.startsWith("text/html") &&
-					(url.hostname === "accounts.google.com" || Number(res.headers.get("content-length") || 0) < 4096)
-				) {
-					const html = await res.text();
-					// Drive's "Redirecting..." page: a JS redirect, usually a passive sign-in hop
-					const next = /<title>Redirecting\.\.\.<\/title>[\s\S]*?var url = '([^']+)'/.exec(html)?.[1];
-					if (next) {
-						url = new URL(
-							next
-								.replace(/\\x([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
-								.replace(/\\\//g, "/"),
-						);
-						continue;
-					}
-					// ended on a page that wants a person: not signed in (or no access)
-					if (url.hostname === "accounts.google.com") return null;
-					return new Response(html, { status: res.status, headers: res.headers });
-				}
-				const length = Number(res.headers.get("content-length"));
-				if (init.maxBytes && length > init.maxBytes) {
-					await res.body?.cancel();
-					throw new Error(`too large (${Math.round(length / 1e6)} MB > MAX_FILE_MB)`);
-				}
-				return res;
+				// ended on a page that wants a person: not signed in (or no access)
+				if (url.hostname === "accounts.google.com") return null;
+				return new Response(html, { status: res.status, headers: res.headers });
 			}
-			throw new Error("too many redirects");
-		},
-	};
-};
+			const length = Number(res.headers.get("content-length"));
+			if (init.maxBytes && length > init.maxBytes) {
+				await res.body?.cancel();
+				throw new Error(`too large (${Math.round(length / 1e6)} MB > MAX_FILE_MB)`);
+			}
+			return res;
+		}
+		throw new Error("too many redirects");
+	},
+});
 
 /** apply one Set-Cookie header to the in-memory jar (this run only; the browser keeps its own) */
 const setCookie = (jar: Cookie[], line: string, url: URL) => {
