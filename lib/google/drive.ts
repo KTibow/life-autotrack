@@ -3,6 +3,11 @@
  *
  * - Google-native files are exported: Docs → .md (diffable), Sheets → .xlsx, Slides → .pptx
  *   (keeps speaker notes), Drawings → .png. Forms have no export and are skipped.
+ * - Docs come from the HTML zip export, not Google's markdown: that one inlines images as
+ *   base64 downscaled to 720px and drops floating images. The zip has the originals; the
+ *   markdown is made from its HTML, images go next to it numbered in document order, and
+ *   a Doc that's only images becomes just its images. All tabs are included (the default
+ *   export concatenates them).
  * - Uploaded files come from drive.usercontent.google.com (confirm=t skips the virus-scan
  *   interstitial on big files).
  * - Folders are listed with embeddedfolderview (ids, types, titles, modified dates).
@@ -13,6 +18,7 @@
 
 import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
+import { NodeHtmlMarkdown } from "node-html-markdown";
 import type { Google } from "./browser.ts";
 
 export type DriveKind =
@@ -52,7 +58,7 @@ export const driveLinksIn = (html: string | undefined): string[] =>
 	);
 
 const EXPORTS: Partial<Record<DriveKind, (id: string) => string>> = {
-	document: (id) => `https://docs.google.com/document/d/${id}/export?format=md`,
+	document: (id) => `https://docs.google.com/document/d/${id}/export?format=zip`,
 	spreadsheets: (id) => `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`,
 	presentation: (id) => `https://docs.google.com/presentation/d/${id}/export/pptx`,
 	drawings: (id) => `https://docs.google.com/drawings/d/${id}/export/png`,
@@ -194,6 +200,57 @@ export const linksInExport = (name: string, bytes: Uint8Array): string[] => {
 		.flatMap(([, data]) => driveLinksIn(data.toString("utf8")));
 };
 
+/** where a Doc's images end up relative to its .md: filled in once the final name is known */
+export const IMAGES_DIR = "\u0001images\u0001";
+
+export type Exported = {
+	name: string;
+	bytes: Uint8Array;
+	/** a Doc's images, in document order (01.png, 02.jpg, …) */
+	images?: { name: string; bytes: Uint8Array }[];
+	/** the Doc has (next to) no text: archive just its images */
+	imagesOnly?: boolean;
+};
+
+const nhm = new NodeHtmlMarkdown({ keepDataImages: false, useLinkReferenceDefinitions: false });
+
+/** a Docs HTML zip → markdown whose images point at IMAGES_DIR/NN.ext, and those images */
+const docFromZip = (zip: Uint8Array): Pick<Exported, "bytes" | "images" | "imagesOnly"> | null => {
+	const entries = readZip(zip);
+	const htmlName = entries && [...entries.keys()].find((n) => n.endsWith(".html"));
+	if (!entries || !htmlName) return null;
+	let html = entries.get(htmlName)!.toString("utf8");
+	html = html.replace(/^[\s\S]*?<body[^>]*>/, "").replace(/<\/body>[\s\S]*$/, "");
+	// links go through a google.com/url redirect whose tracking params change every export
+	html = html.replace(/https:\/\/www\.google\.com\/url\?q=([^&"]+)[^"]*/g, (_, q) => {
+		try {
+			return decodeURIComponent(q);
+		} catch {
+			return q;
+		}
+	});
+	// the zip numbers images arbitrarily (differently every export): renumber by first use
+	const order: string[] = [];
+	for (const m of html.matchAll(/src="(images\/[^"]+)"/g)) if (!order.includes(m[1])) order.push(m[1]);
+	for (const n of entries.keys()) if (n.startsWith("images/") && !order.includes(n)) order.push(n);
+	const width = String(order.length).length < 2 ? 2 : String(order.length).length;
+	const renamed = new Map(
+		order.map((n, i) => [n, `${String(i + 1).padStart(width, "0")}${/\.[a-z0-9]+$/i.exec(n)?.[0] ?? ""}`]),
+	);
+	html = html.replace(/src="(images\/[^"]+)"/g, (m, n) =>
+		renamed.has(n) ? `src="${IMAGES_DIR}/${renamed.get(n)}"` : m,
+	);
+	const md = nhm.translate(html).trim() + "\n";
+	const text = md.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[^\p{L}\p{N}]/gu, "");
+	return {
+		bytes: Buffer.from(md),
+		images: order
+			.filter((n) => entries.has(n))
+			.map((n) => ({ name: renamed.get(n)!, bytes: entries.get(n)! })),
+		imagesOnly: order.length > 0 && text.length < 10,
+	};
+};
+
 /**
  * The file's bytes and Drive title, or null when this account can't see it (not shared,
  * deleted) or there's nothing to download (Forms).
@@ -202,7 +259,7 @@ export const downloadDrive = async (
 	g: Google,
 	ref: DriveRef,
 	maxBytes?: number,
-): Promise<{ name: string; bytes: Uint8Array } | null> => {
+): Promise<Exported | null> => {
 	const url = EXPORTS[ref.kind]?.(ref.id);
 	if (!url) return null;
 	const res = await g.fetch(url, { maxBytes });
@@ -223,6 +280,11 @@ export const downloadDrive = async (
 	let bytes: Uint8Array = new Uint8Array(await res.arrayBuffer());
 	if (ref.kind === "spreadsheets" || ref.kind === "presentation") bytes = normalizeZip(bytes);
 	const name = filenameOf(res) ?? `${ref.id}${EXT[ref.kind] ?? ""}`;
+	if (ref.kind === "document") {
+		const doc = docFromZip(bytes);
+		if (!doc) throw new Error("unreadable Docs export");
+		return { name: `${name.replace(/\.zip$/i, "")}.md`, ...doc };
+	}
 	return { name, bytes };
 };
 

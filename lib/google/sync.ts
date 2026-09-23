@@ -26,6 +26,7 @@ import {
 	EXT,
 	isNative,
 	linksInExport,
+	IMAGES_DIR,
 	listFolder,
 	officeFingerprint,
 	parseDriveUrl,
@@ -107,21 +108,35 @@ const syncFile = async (
 	name: Namer,
 	opts: { previous?: string; title?: string; modified?: string },
 ): Promise<string | null> => {
-	const { store, files, google } = ctx;
-	// the name we'd use without downloading: last run's, or the listing title
-	const guess =
-		opts.previous ??
-		(opts.title
-			? `${opts.title}${EXT[ref.kind] && !opts.title.endsWith(EXT[ref.kind]!) ? EXT[ref.kind] : ""}`
-			: undefined);
-	const checked = guess ? await checkedAt(store, `${dir}/${guess}`) : undefined;
+	const { store, google } = ctx;
+	// the name we'd use without downloading: last run's, or the listing title (a Doc can be
+	// `Title.md` or, if it's only images, a `Title/` directory)
+	const ext = EXT[ref.kind] ?? "";
+	const candidates = opts.previous
+		? [opts.previous]
+		: opts.title
+			? ref.kind === "document"
+				? [`${opts.title}.md`, opts.title]
+				: [`${opts.title}${ext && !opts.title.endsWith(ext) ? ext : ""}`]
+			: [];
+	let guess: string | undefined;
+	let checked: number | undefined;
+	for (const c of candidates) {
+		checked = await checkedAt(store, `${dir}/${c}`);
+		guess = c;
+		if (checked !== undefined) break;
+	}
+	const keepAll = async (kept: string) => {
+		await store.keep(`${dir}/${kept}`);
+		if (kept.endsWith(".md")) await store.keep(`${dir}/${stem(kept)}.images`);
+		await syncLinkedFrom(ctx, ref, dir, kept, null);
+	};
 	const fresh =
 		checked !== undefined &&
 		(!isNative(ref.kind) ||
 			(Date.now() - checked < RECHECK_MS && (listingTime(opts.modified) ?? 0) <= checked));
 	if (guess && checked !== undefined && (fresh || !google) && name.claim(guess)) {
-		await store.keep(`${dir}/${guess}`);
-		await syncLinkedFrom(ctx, ref, dir, guess, null);
+		await keepAll(guess);
 		return guess;
 	}
 	if (!google) return null;
@@ -130,14 +145,45 @@ const syncFile = async (
 		return undefined;
 	});
 	if (got === undefined && guess && checked !== undefined && name.claim(guess)) {
-		await store.keep(`${dir}/${guess}`); // transient failure: keep last run's copy
-		await syncLinkedFrom(ctx, ref, dir, guess, null);
+		await keepAll(guess); // transient failure: keep last run's copy
 		return guess;
 	}
 	if (!got) return null; // no access, or nothing to download (Forms)
+
+	// a Doc's images, numbered in document order, into `sub`
+	const linkImages = async (sub: string) => {
+		let changed = 0;
+		for (const img of got.images ?? []) {
+			const at = `${sub}/${img.name}`;
+			const was = await store.readLinkTarget(at);
+			const blob = await store.blob(img.bytes);
+			await store.link(at, blob);
+			if (was !== blob.sha256) changed++;
+		}
+		return changed;
+	};
+	if (got.imagesOnly) {
+		// a Doc that's just images (scans, screenshots) is archived as just its images
+		const final = name(stem(got.name));
+		const changed = await linkImages(`${dir}/${final}`);
+		if (changed)
+			log(
+				`  ↓ ${final}/ (${got.images!.length} images from a Doc${changed < got.images!.length ? `, ${changed} changed` : ""})`,
+			);
+		await markChecked(store, `${dir}/${final}`);
+		return final;
+	}
+
 	const dot = got.name.lastIndexOf(".");
 	const final = dot > 0 ? name(got.name.slice(0, dot), got.name.slice(dot)) : name(got.name);
 	const rel = `${dir}/${final}`;
+	if (got.images?.length) {
+		await linkImages(`${dir}/${stem(final)}.images`);
+		const imagesDir = encodeURI(`${stem(final)}.images`)
+			.replace(/\(/g, "%28")
+			.replace(/\)/g, "%29");
+		got.bytes = Buffer.from(Buffer.from(got.bytes).toString("utf8").replaceAll(IMAGES_DIR, imagesDir));
+	}
 	const before = await store.readLinkTarget(rel);
 	// Office exports aren't byte-stable (Slides renumbers images every time): if the content
 	// matches what's archived, keep the archived copy so nothing changes

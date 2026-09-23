@@ -97,7 +97,10 @@ cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
 - Links inside those files (a Doc's links, a deck's hyperlinks and speaker notes, a
   Sheet's cells) are followed too, into `<file>.attachments/`, up to
   `DRIVE_LINK_DEPTH` hops.
-- Docs → `.md`, Sheets → `.xlsx`, Slides → `.pptx` (keeps speaker notes), Drawings → `.png`, uploads as
+- Docs → `.md` (all tabs) with their images, full resolution and in document order, in
+  `<doc>.images/`; a Doc that's only images (a scan, screenshots) becomes just a
+  `<doc>/` folder of `01.png, 02.png, …`.
+- Sheets → `.xlsx`, Slides → `.pptx` (keeps speaker notes), Drawings → `.png`, uploads as
   uploaded, folders as directories. Exports are normalized so an unchanged file
   re-exports to identical bytes; Google-native files are rechecked when their folder
   says they changed, or every `DRIVE_RECHECK_HOURS`.
