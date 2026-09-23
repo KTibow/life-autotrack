@@ -170,8 +170,13 @@ const launch = async (profile: string, headed: boolean): Promise<string> => {
 };
 
 export type Google = {
+	/** no signed-in session: only public files are reachable, and "no access" proves nothing */
+	anonymous?: boolean;
 	/** fetch with the session's cookies, following redirects; null when Google wants a sign-in */
-	fetch: (url: string, init?: { accept?: string; maxBytes?: number }) => Promise<Response | null>;
+	fetch: (
+		url: string,
+		init?: { accept?: string; maxBytes?: number; timeoutMs?: number },
+	) => Promise<Response | null>;
 };
 
 const cookieHeader = (cookies: Cookie[], url: URL) =>
@@ -260,20 +265,24 @@ export const connectGoogle = async ({ interactive = false } = {}): Promise<Conne
 	}
 };
 
-/** for trackers: a session, or null with a log line saying Drive is skipped this run */
-export const openGoogle = async (): Promise<Google | null> => {
+/**
+ * For trackers: the signed-in session, or else an anonymous one (public files still work,
+ * everything else keeps what's archived), with a log line saying which.
+ */
+export const openGoogle = async (): Promise<Google> => {
 	const c = await connectGoogle();
 	if (c.state === "ready") {
 		log("  Google: session ready");
 		return c.google;
 	}
-	if (c.state === "unconfigured") log("  Google: CHROMIUM_PROFILE_DIR not set, skipping Drive links");
+	const anonymous = { ...session([]), anonymous: true };
+	if (c.state === "unconfigured") log("  Google: CHROMIUM_PROFILE_DIR not set, public Drive files only");
 	else if (c.state === "signed-out")
 		logWarn(
-			`Google: not signed in, skipping Drive this run. Run \`pnpm google:login\` on the machine to sign in`,
+			`Google: not signed in, public Drive files only this run. Run \`pnpm google:login\` on the machine to sign in`,
 		);
-	else logWarn(`Google: skipping Drive this run: ${c.error}`);
-	return null;
+	else logWarn(`Google: public Drive files only this run: ${c.error}`);
+	return anonymous;
 };
 
 const session = (cookies: Cookie[]): Google => ({
@@ -284,7 +293,7 @@ const session = (cookies: Cookie[]): Google => ({
 			const res = await fetch(url, {
 				redirect: "manual",
 				headers: { cookie: cookieHeader(cookies, url), ...(init.accept && { accept: init.accept }) },
-				signal: AbortSignal.timeout(10 * 60_000),
+				signal: AbortSignal.timeout(init.timeoutMs ?? 10 * 60_000),
 			});
 			// services hand out their own cookies (e.g. Drive's OSID) along redirect chains
 			for (const line of res.headers.getSetCookie()) setCookie(cookies, line, url);

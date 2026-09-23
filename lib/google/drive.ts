@@ -35,8 +35,9 @@ export const parseDriveUrl = (raw: string): DriveRef | null => {
 	}
 	const id = String.raw`([A-Za-z0-9_-]{20,})`;
 	if (url.hostname === "docs.google.com") {
+		// also /a/<domain>/document/d/… (old Workspace links) and /u/<n>/ account prefixes
 		const m = new RegExp(
-			String.raw`^/(document|spreadsheets|presentation|drawings|forms)/(?:u/\d+/)?d/${id}`,
+			String.raw`^/(?:a/[^/]+/)?(document|spreadsheets|presentation|drawings|forms)/(?:u/\d+/)?d/${id}`,
 		).exec(url.pathname);
 		return m ? { kind: m[1] as DriveKind, id: m[2] } : null;
 	}
@@ -46,6 +47,7 @@ export const parseDriveUrl = (raw: string): DriveRef | null => {
 		const file = new RegExp(String.raw`/file/(?:u/\d+/)?d/${id}`).exec(url.pathname);
 		if (file) return { kind: "file", id: file[1] };
 		const q = url.searchParams.get("id");
+		if (q && url.pathname === "/embeddedfolderview") return { kind: "folder", id: q };
 		if (q && /^(\/open|\/uc|\/drive\/?)$/.test(url.pathname)) return { kind: "file", id: q };
 	}
 	return null;
@@ -134,11 +136,21 @@ const readZip = (bytes: Uint8Array): Map<string, Buffer> | null => {
 /**
  * A fingerprint of an Office file's content that ignores how the export happened to be
  * packed: entry order, timestamps, and the arbitrary numbering of interchangeable parts
- * (Slides numbers a deck's images and themes differently on every export). Those parts
+ * (Slides numbers a deck's images and themes differently on every export), and GUIDs
+ * minted per export (table style ids). The interchangeable parts
  * are named by their content hash, references to them rewritten, and everything is then
  * hashed in name order.
  */
 export const officeFingerprint = (bytes: Uint8Array): string | null => {
+	const canonical = officeCanonical(bytes);
+	if (!canonical) return null;
+	const hash = createHash("sha256");
+	for (const [name, data] of canonical) hash.update(name).update("\0").update(data);
+	return hash.digest("hex");
+};
+
+/** the canonical (name-sorted) entries officeFingerprint hashes */
+export const officeCanonical = (bytes: Uint8Array): [string, Buffer][] | null => {
 	const entries = readZip(bytes);
 	if (!entries) return null;
 	const sha = (data: Buffer) => `sha-${createHash("sha256").update(data).digest("hex")}`;
@@ -173,10 +185,25 @@ export const officeFingerprint = (bytes: Uint8Array): string | null => {
 			);
 		return [renamedName, Buffer.from(text)];
 	});
-	const hash = createHash("sha256");
-	for (const [name, data] of canonical.sort(([a], [b]) => (a < b ? -1 : 1)))
-		hash.update(name).update("\0").update(data);
-	return hash.digest("hex");
+	canonical.sort(([a], [b]) => (a < b ? -1 : 1));
+	// GUIDs (e.g. table style ids) are minted fresh every export: number them by first use
+	const guids = new Map<string, string>();
+	return canonical.map(([name, data]): [string, Buffer] =>
+		/\.(xml|rels)$/.test(name) || name === "[Content_Types].xml"
+			? [
+					name,
+					Buffer.from(
+						data
+							.toString("utf8")
+							.replace(/\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}/gi, (g) => {
+								const k = g.toUpperCase();
+								if (!guids.has(k)) guids.set(k, `{guid-${guids.size}}`);
+								return guids.get(k)!;
+							}),
+					),
+				]
+			: [name, data],
+	);
 };
 
 /**
@@ -200,6 +227,19 @@ export const linksInExport = (name: string, bytes: Uint8Array): string[] => {
 		.flatMap(([, data]) => driveLinksIn(data.toString("utf8")));
 };
 
+/**
+ * Google wraps outbound links (in Docs exports, on Sites) in a google.com/url redirect
+ * whose tracking params change every time: point them at where they actually go.
+ */
+export const unwrapRedirects = (html: string) =>
+	html.replace(/https:\/\/www\.google\.com\/url\?(?:[^"]*?&(?:amp;)?)?q=([^&"]+)[^"]*/g, (_, q) => {
+		try {
+			return decodeURIComponent(q);
+		} catch {
+			return q;
+		}
+	});
+
 /** where a Doc's images end up relative to its .md: filled in once the final name is known */
 export const IMAGES_DIR = "\u0001images\u0001";
 
@@ -221,14 +261,7 @@ const docFromZip = (zip: Uint8Array): Pick<Exported, "bytes" | "images" | "image
 	if (!entries || !htmlName) return null;
 	let html = entries.get(htmlName)!.toString("utf8");
 	html = html.replace(/^[\s\S]*?<body[^>]*>/, "").replace(/<\/body>[\s\S]*$/, "");
-	// links go through a google.com/url redirect whose tracking params change every export
-	html = html.replace(/https:\/\/www\.google\.com\/url\?q=([^&"]+)[^"]*/g, (_, q) => {
-		try {
-			return decodeURIComponent(q);
-		} catch {
-			return q;
-		}
-	});
+	html = unwrapRedirects(html);
 	// the zip numbers images arbitrarily (differently every export): renumber by first use
 	const order: string[] = [];
 	for (const m of html.matchAll(/src="(images\/[^"]+)"/g)) if (!order.includes(m[1])) order.push(m[1]);

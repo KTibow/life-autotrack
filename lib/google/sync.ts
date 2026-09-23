@@ -148,7 +148,14 @@ const syncFile = async (
 		await keepAll(guess); // transient failure: keep last run's copy
 		return guess;
 	}
-	if (!got) return null; // no access, or nothing to download (Forms)
+	if (!got) {
+		// signed out, only public access: "can't see it" may just mean "not signed in"
+		if (google.anonymous && guess && checked !== undefined && name.claim(guess)) {
+			await keepAll(guess);
+			return guess;
+		}
+		return null; // no access, or nothing to download (Forms)
+	}
 
 	// a Doc's images, numbered in document order, into `sub`
 	const linkImages = async (sub: string) => {
@@ -227,7 +234,7 @@ const syncFolder = async (
 		return undefined;
 	});
 	if (listing === undefined) return keepPrevious();
-	if (!listing) return null;
+	if (!listing) return google.anonymous ? keepPrevious() : null;
 	const folderName = name(listing.title || opts.title || id);
 	const sub = `${dir}/${folderName}`;
 	if (opts.previous && opts.previous !== folderName && (await store.move(`${dir}/${opts.previous}`, sub)))
