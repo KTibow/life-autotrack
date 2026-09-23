@@ -6,11 +6,11 @@
  * machine's screen.
  */
 
-import { createServer } from "node:http";
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { need, optional, ROOT } from "../../lib/env.ts";
 import { openWindow } from "../../lib/google/browser.ts";
+import { sleep } from "../../lib/http.ts";
 import { log } from "../../lib/log.ts";
 import { API, authorization, createSchoology, type SchoologyAuth } from "./client.ts";
 
@@ -50,40 +50,30 @@ const saveEnv = async (values: Record<string, string>) => {
 // 1. request token
 const request = await tokenCall("/oauth/request_token", { ...consumer, tokenKey: "", tokenSecret: "" });
 
-// 2. the person approves in the browser; Schoology then redirects to this local callback
-const server = createServer();
-const approved = new Promise<void>((done) =>
-	server.on("request", (req, res) => {
-		const token = new URL(req.url ?? "/", "http://localhost").searchParams.get("oauth_token");
-		res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-		res.end(token === request.key ? "Approved. You can close this window." : "Waiting for approval…");
-		if (token === request.key) done();
-	}),
-);
-await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
-const callback = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
+// 2. the person approves in the browser. Schoology only redirects to callbacks it allows,
+// so the callback is Schoology itself: the tab landing there with our token means approved
 const authorize =
 	`https://${HOST}/oauth/authorize?oauth_token=${encodeURIComponent(request.key)}` +
-	`&oauth_callback=${encodeURIComponent(callback)}`;
+	`&oauth_callback=${encodeURIComponent(`https://${HOST}/home`)}`;
+const isApproved = (url: string) => {
+	const u = URL.parse(url);
+	return !!u && u.pathname !== "/oauth/authorize" && u.searchParams.get("oauth_token") === request.key;
+};
 
 let browser: Awaited<ReturnType<typeof openWindow>>;
 try {
 	browser = await openWindow(authorize);
 } catch (e) {
-	console.log(`Couldn't open Chromium.\n${(e as Error).message}\n\nOr open this yourself:\n${authorize}`);
-	server.close();
+	console.log(`Couldn't open Chromium.\n${(e as Error).message}`);
 	process.exit(1);
 }
 log("  waiting for you to sign in and Approve in the Chromium window (up to 15 minutes, Ctrl-C to stop)…");
 process.once("SIGINT", () => void browser.close().finally(() => process.exit(130)));
-const timedOut = await Promise.race([
-	approved.then(() => false),
-	new Promise<boolean>((t) => setTimeout(() => t(true), 15 * 60_000).unref()),
-]);
-server.close();
-await new Promise((r) => setTimeout(r, 1000)); // let the "Approved" page show
+let approved = false;
+for (const deadline = Date.now() + 15 * 60_000; !approved && Date.now() < deadline; await sleep(500))
+	approved = (await browser.urls()).some(isApproved);
 await browser.close();
-if (timedOut) {
+if (!approved) {
 	console.log("Not approved within 15 minutes; the window was closed. Run `pnpm schoology:login` again.");
 	process.exit(1);
 }

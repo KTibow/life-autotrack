@@ -272,7 +272,8 @@ export const connectGoogle = async ({ interactive = false } = {}): Promise<Conne
 
 /**
  * Open `url` in a window on the profile for a person to use (a new tab if Chromium is
- * already running there). `close` shuts the browser only if this started it.
+ * already running there). `urls` lists the open pages, to see where they've got to;
+ * `close` shuts the browser if this started it, else just the tab.
  */
 export const openWindow = async (url: string) => {
 	const profile = pathEnv("CHROMIUM_PROFILE_DIR");
@@ -281,10 +282,12 @@ export const openWindow = async (url: string) => {
 	const started = !ws;
 	if (!ws) ws = await launch(profile, true, url);
 	const browser = await cdp(ws);
-	if (!started) await browser.send("Target.createTarget", { url });
+	const tab = started ? undefined : (await browser.send("Target.createTarget", { url })).targetId;
 	return {
+		urls: () => pageUrls(browser),
 		close: async () => {
 			if (started) await browser.send("Browser.close").catch(() => {});
+			else await browser.send("Target.closeTarget", { targetId: tab }).catch(() => {});
 			browser.close();
 		},
 	};
