@@ -3,7 +3,7 @@
  *
  *   2026-2027/s1-p3-us-history/               <term>-p<period>-<course>, from the section title
  *   ongoing/robotics-club/                    a section whose grading periods span years (clubs)
- *     section.json                            ids, titles, grading period dates, index_only
+ *     section.json                            ids, titles, grading period dates
  *     materials/                              the materials tree, as folders
  *       Unit 1/
  *         Notes.md                            a page: body as markdown, fields as frontmatter
@@ -19,7 +19,7 @@
  *     updates/2026-09-22 14-05.md             (+ .attachments/, .comments.json)
  *     events/2026-10-01 Field trip.md
  *
- * Every markdown file's frontmatter has the Schoology `type` and `id`. Objects are trimmed
+ * Every markdown file's frontmatter has the Schoology `type`, `id` and `url`. Objects are trimmed
  * to the fields worth keeping; grades are left to StudentVUE. Sections you leave (last
  * term) stay where they are.
  */
@@ -39,10 +39,8 @@ import { createSchoology, SchoologyError, type Schoology } from "./client.ts";
 
 const WEB = `https://${optional("SCHOOLOGY_HOST") ?? "app.schoology.com"}`;
 const MAX_FILE_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
-/** a section whose attachments add up to more than this is index-only (see archiveSection) */
-const INDEX_ONLY_BYTES = Number(optional("SCHOOLOGY_INDEX_ONLY_MB") ?? 500) * 1024 * 1024;
-/** section ids that are always archived in full, whatever their size */
-const FULL_SECTIONS = new Set((optional("SCHOOLOGY_FULL_SECTIONS") ?? "").split(",").map((id) => id.trim()));
+/** new files downloaded per section per run; the rest wait for later runs (see archiveSection) */
+const FILES_PER_RUN = Number(optional("SCHOOLOGY_FILES_PER_RUN") ?? 10);
 
 /** 403/404 on a listing means "not available in this section", not a failure */
 const orEmpty = async <T>(p: Promise<T[]>): Promise<T[]> => {
@@ -114,7 +112,7 @@ const FIELDS: Record<string, string[]> = {
 	document: ["title"],
 };
 
-/** an item's page on the website: the way to it in an index-only section */
+/** an item's page on the website */
 const webUrl = (sid: string, type: string, id: unknown) =>
 	type === "assignment"
 		? `${WEB}/assignment/${id}/info`
@@ -170,24 +168,22 @@ const archiveSection = async (
 			`${discussions.length} discussions, ${updates.length} updates, ${events.length} events`,
 	);
 
-	// A section with a big catalog (a club's shelf of PDFs) is index-only, decided up front
-	// from sizes the listings already give: every item is still written, with its fields,
-	// its files' metadata and a `url` to its page, but nothing new is downloaded (Drive
-	// links included). Your own submissions are the exception. Whatever was archived
-	// before stays, so a section that grows past the line loses nothing.
-	const bytes = [...assignments, ...pages, ...documents, ...discussions, ...updates]
-		.flatMap((it) => it.attachments?.files?.file ?? [])
-		.reduce((n, f) => n + (Number(f.filesize) || 0), 0);
-	const indexOnly = bytes > INDEX_ONLY_BYTES && !FULL_SECTIONS.has(sid);
-	if (indexOnly) log(`  ${label}: index-only (${mb(bytes)} of attachments > SCHOOLOGY_INDEX_ONLY_MB)`);
 	await store.writeJson(
 		`${dir}/section.json`,
 		compact({
 			...pick(section, ["id", "course_id", "course_title", "section_title"]),
 			grading_periods: periods.map((p: any) => pick(p, ["title", "start", "end"])),
-			index_only: indexOnly || undefined,
 		}),
 	);
+
+	// Files fill in over runs: every item is written each run (fields, its files' metadata,
+	// a `url` to its page), but at most FILES_PER_RUN new files are downloaded, in the
+	// order the website lists them. A class's few new files a week come right away; a
+	// club's shelf of 166 PDFs trickles in without hammering Schoology. Your own
+	// submissions don't wait. Files already archived are never refetched, so they don't count.
+	let budget = FILES_PER_RUN;
+	let deferred = 0;
+	const take = (always = false) => always || budget-- > 0 || (deferred++, false);
 
 	// what was here last run, by type:id, so new things get noted even if they also moved
 	const before = new Set<string>();
@@ -206,7 +202,7 @@ const archiveSection = async (
 	// files already archived anywhere in this section, so moving an item between folders
 	// doesn't mean downloading its files again
 	const known = await files.scan(dir);
-	/** false when the file isn't archived (too big, failed, or index-only and not fetched before) */
+	/** false when the file isn't archived (too big, failed, or waiting for a later run) */
 	const linkFile = async (rel: string, file: any, always = false): Promise<boolean> => {
 		const size = Number(file.filesize) || 0;
 		if (size > MAX_FILE_BYTES) {
@@ -216,8 +212,7 @@ const archiveSection = async (
 		const name = rel.slice(rel.lastIndexOf("/") + 1);
 		return files.link(
 			rel,
-			async () =>
-				(!indexOnly || always) && file.download_path ? await sc.download(file.download_path) : null,
+			async () => (file.download_path && take(always) ? await sc.download(file.download_path) : null),
 			known.get(`${name}\0${size}`),
 			{ type: "file", id: file.id },
 		);
@@ -245,14 +240,9 @@ const archiveSection = async (
 		);
 		const drive = [];
 		for (const { url, ref } of refs.values()) {
-			if (indexOnly) {
-				// keep a copy synced before, but don't sync anything
-				const file = previous.get(url);
-				if (file && store.exists(`${base}.attachments/${file}`) && name.claim(file)) {
-					await store.keep(`${base}.attachments/${file}`);
-					await store.keep(`${base}.attachments/${file.replace(/\.[^.]+$/, "")}.attachments`);
-					drive.push({ url, file });
-				} else drive.push({ url });
+			// a link never synced before is a new file too
+			if (!previous.get(url) && !take()) {
+				drive.push({ url });
 				continue;
 			}
 			const file = await syncDrive(
@@ -286,8 +276,8 @@ const archiveSection = async (
 		if (firstSeen(type, obj.id) && (type === "assignment" || type === "page"))
 			ctx.note(`new ${type} in ${course}: ${obj.title}`);
 
-		// a document that is only a single file is that file (index-only and not archived
-		// before: an item like any other, with the file's metadata and a url)
+		// a document that is only a single file is that file (until it's archived: an item
+		// like any other, with the file's metadata and a url)
 		const docFiles = obj.attachments?.files?.file ?? [];
 		if (type === "document" && docFiles.length === 1 && !obj.attachments?.links?.link?.length) {
 			const f = docFiles[0];
@@ -295,7 +285,7 @@ const archiveSection = async (
 			const title: string = obj.title ?? "";
 			const stem =
 				ext && title.toLowerCase().endsWith(ext.toLowerCase()) ? title.slice(0, -ext.length) : title;
-			if ((await linkFile(`${folder}/${name(stem || f.filename, ext)}`, f)) || !indexOnly) return;
+			if (await linkFile(`${folder}/${name(stem || f.filename, ext)}`, f)) return;
 		}
 
 		const base = `${folder}/${name(obj.title)}`;
@@ -304,7 +294,7 @@ const archiveSection = async (
 			id: obj.id,
 			...pick(obj, FIELDS[type] ?? ["title"]),
 			attachments: attachments(obj.attachments),
-			url: indexOnly ? webUrl(sid, type, obj.id) : undefined,
+			url: webUrl(sid, type, obj.id),
 		});
 		if (type === "assignment" && Number(obj.allow_dropbox) && obj.grade_item_id) {
 			// your own submission history
@@ -373,7 +363,7 @@ const archiveSection = async (
 				...pick(u, ["uid", "created", "last_updated", "poll"]),
 				attachments: attachments(u.attachments),
 				drive,
-				url: indexOnly ? webUrl(sid, "update", u.id) : undefined,
+				url: webUrl(sid, "update", u.id),
 			}),
 			md(u.body),
 		);
@@ -390,6 +380,7 @@ const archiveSection = async (
 				md(e.description),
 			);
 
+	if (deferred) log(`  ${label}: ${deferred} new files left for later runs (SCHOOLOGY_FILES_PER_RUN)`);
 	store.complete(dir);
 };
 

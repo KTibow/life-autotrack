@@ -70,7 +70,7 @@ life/
   `key: <json>` per line, so text diffs read like text.
 - **Laid out like the source.** `tree life/schoology` looks like the website: courses
   you can find with one `ls`, folders and items by their titles. Every markdown file's
-  frontmatter carries the source's `type` and `id`. Grades live only in StudentVUE.
+  frontmatter carries the source's `type`, `id` and `url`. Grades live only in StudentVUE.
 - **Documents are markdown.** Google Docs and Slides, and uploaded PDF, Word and
   PowerPoint files, are each one `<name>.md` (text, tables, speaker notes) with their
   images in `<name>.images/`, full size, in document order. The frontmatter points into
@@ -82,12 +82,10 @@ life/
   appears gets a relative symlink with a human name; those links are also the download
   cache (a moved item's files are recognized by name and size, not refetched). `find -lname '*<sha>'` gives every name a file has had. Blobs are marked
   `binary` so they stay out of text diffs.
-- **Big catalogs are index-only.** A section whose attachments add up to more than
-  `SCHOOLOGY_INDEX_ONLY_MB` (a club's shelf of PDFs) is decided up front, from sizes the
-  listings already give: every item is still written, with its files' metadata and a
-  `url` to its page, but nothing new is downloaded except your own submissions.
-  `section.json` says `index_only`. What was archived before stays. Section ids in
-  `SCHOOLOGY_FULL_SECTIONS` are always archived in full.
+- **Files fill in over runs.** Every item is written every run, with its files' metadata
+  and a `url` to its page, but each section downloads at most `SCHOOLOGY_FILES_PER_RUN`
+  new files per run (your own submissions don't wait). A class's few new files a week
+  arrive right away; a club's shelf of PDFs trickles in without hammering Schoology.
 - **Failures never look like deletions.** Stale files are only pruned from a directory
   whose data was fully fetched in that run. Past-term sections stay in place.
 - **Commits are scoped.** A facet commits only its own directory plus the blobs it
