@@ -18,7 +18,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { closeSync, openSync } from "node:fs";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { optional } from "../env.ts";
 import { sleep } from "../http.ts";
@@ -66,6 +67,36 @@ const running = async (profile: string): Promise<string | null> => {
 	}
 };
 
+/**
+ * The desktop session's display environment, for a run started over SSH or from cron:
+ * those don't inherit the X cookie (XAUTHORITY) or the Wayland socket, so the display
+ * turns Chromium away ("Authorization required ... Missing X server"). Anything already
+ * set in the environment or .env wins.
+ */
+const desktopEnv = async (): Promise<Record<string, string>> => {
+	const env: Record<string, string> = {};
+	const uid = process.getuid?.();
+	if (uid === undefined) return env;
+	const runtime = process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+	if (!existsSync(runtime)) return env;
+	if (!process.env.XDG_RUNTIME_DIR) env.XDG_RUNTIME_DIR = runtime;
+	if (!process.env.WAYLAND_DISPLAY && existsSync(join(runtime, "wayland-0")))
+		env.WAYLAND_DISPLAY = "wayland-0";
+	if (!process.env.XAUTHORITY) {
+		const names = await readdir(runtime).catch(() => [] as string[]);
+		const candidates = [
+			join(runtime, "gdm", "Xauthority"), // GNOME on X11
+			...names.filter((n) => n.startsWith(".mutter-Xwaylandauth.")).map((n) => join(runtime, n)), // GNOME on Wayland
+			...names.filter((n) => n.startsWith("xauth_")).map((n) => join(runtime, n)), // KDE / SDDM
+			join(homedir(), ".Xauthority"),
+		];
+		const found = candidates.find((c) => existsSync(c));
+		if (found) env.XAUTHORITY = found;
+	}
+	if (!process.env.DISPLAY && env.XAUTHORITY) env.DISPLAY = ":0";
+	return env;
+};
+
 const launch = async (profile: string): Promise<string> => {
 	await mkdir(profile, { recursive: true });
 	await rm(join(profile, "DevToolsActivePort"), { force: true });
@@ -73,7 +104,15 @@ const launch = async (profile: string): Promise<string> => {
 	// Chromium's own output goes here, so a failed start can say why
 	const logFile = join(profile, "life-autotrack-chromium.log");
 	const out = openSync(logFile, "w");
-	log(`  starting Chromium (${cmd}) on ${profile}`);
+	const desktop = await desktopEnv();
+	log(
+		`  starting Chromium (${cmd}) on ${profile}` +
+			(Object.keys(desktop).length
+				? ` with ${Object.entries(desktop)
+						.map(([k, v]) => `${k}=${v}`)
+						.join(" ")}`
+				: ""),
+	);
 	const child = spawn(
 		cmd,
 		[
@@ -83,9 +122,11 @@ const launch = async (profile: string): Promise<string> => {
 			"--password-store=basic",
 			"--no-first-run",
 			"--no-default-browser-check",
+			// use Wayland when the session has it, X11 otherwise
+			"--ozone-platform-hint=auto",
 			"https://drive.google.com/",
 		],
-		{ detached: true, stdio: ["ignore", out, out] },
+		{ detached: true, stdio: ["ignore", out, out], env: { ...process.env, ...desktop } },
 	);
 	closeSync(out);
 	let exited: string | undefined;
@@ -97,6 +138,7 @@ const launch = async (profile: string): Promise<string> => {
 		const ws = await running(profile);
 		if (ws) return ws;
 	}
+
 	const tail = (await readFile(logFile, "utf8").catch(() => ""))
 		.split("\n")
 		.filter((l) => l.trim())
@@ -105,7 +147,11 @@ const launch = async (profile: string): Promise<string> => {
 	const hints = [
 		!process.env.DISPLAY &&
 			!process.env.WAYLAND_DISPLAY &&
-			"no DISPLAY/WAYLAND_DISPLAY in the environment (set DISPLAY=:0 in .env)",
+			!desktop.DISPLAY &&
+			!desktop.WAYLAND_DISPLAY &&
+			"no display found (is someone logged in to the desktop? else set DISPLAY=:0 in .env)",
+		/authorization/i.test(tail) &&
+			"the display refused us: set XAUTHORITY in .env to the desktop session's X cookie (the -auth path in `ps -o args= -C Xwayland,Xorg`)",
 		existsSync(join(profile, "SingletonLock")) &&
 			"this profile is already open in another Chromium started without the debugging port (close that window)",
 		process.getuid?.() === 0 && "running as root: Chromium needs --no-sandbox in CHROMIUM_COMMAND",
