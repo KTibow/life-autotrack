@@ -5,6 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"schoology": "node facets/schoology/index.ts",
+		"schoology:login": "node facets/schoology/login.ts",
 		"studentvue": "node facets/studentvue/index.ts",
 		"sites": "node facets/sites/index.ts",
 		"google:login": "node facets/google-login.ts",

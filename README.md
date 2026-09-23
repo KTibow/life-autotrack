@@ -29,14 +29,15 @@ cron it yourself, e.g.:
 Overlapping runs are safe. A facet that is already running skips (and exits 0), and
 different facets fetch in parallel but take turns committing.
 
-| command           | does                                               |
-| ----------------- | -------------------------------------------------- |
-| `pnpm schoology`  | archive Schoology → `life/schoology/`              |
-| `pnpm studentvue` | archive StudentVUE → `life/studentvue/`            |
-| `pnpm site`       | build the site from `life/`, sync it to R2         |
-| `pnpm site:dry`   | build (and diff against R2 if credentials are set) |
-| `pnpm site:dev`   | vite dev server over the current `life/`           |
-| `pnpm check`      | typecheck                                          |
+| command                | does                                                 |
+| ---------------------- | ---------------------------------------------------- |
+| `pnpm schoology`       | archive Schoology → `life/schoology/`                |
+| `pnpm schoology:login` | new Schoology token (approve in the Chromium window) |
+| `pnpm studentvue`      | archive StudentVUE → `life/studentvue/`              |
+| `pnpm site`            | build the site from `life/`, sync it to R2           |
+| `pnpm site:dry`        | build (and diff against R2 if credentials are set)   |
+| `pnpm site:dev`        | vite dev server over the current `life/`             |
+| `pnpm check`           | typecheck                                            |
 
 ## The life repo
 

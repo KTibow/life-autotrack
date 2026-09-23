@@ -32,43 +32,47 @@ export class SchoologyError extends Error {
 	}
 }
 
+/**
+ * The OAuth 1.0a Authorization header for a request. `tokenKey` empty (the first leg of
+ * `schoology:login`) leaves out oauth_token and signs with the consumer secret alone.
+ */
+export const authorization = async (auth: SchoologyAuth, method: string, url: string) => {
+	const u = new URL(url);
+	const params: Record<string, string> = {
+		oauth_consumer_key: auth.consumerKey,
+		oauth_nonce: crypto.randomUUID().replaceAll("-", ""),
+		oauth_signature_method: "HMAC-SHA1",
+		oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
+		...(auth.tokenKey && { oauth_token: auth.tokenKey }),
+		oauth_version: "1.0",
+	};
+	const signed = [...Object.entries(params), ...u.searchParams.entries()]
+		.map(([k, v]) => [enc(k), enc(v)])
+		.sort(([a, av], [b, bv]) => (a === b ? (av < bv ? -1 : 1) : a < b ? -1 : 1))
+		.map(([k, v]) => `${k}=${v}`)
+		.join("&");
+	const base = `${method}&${enc(`${u.protocol}//${u.host}${u.pathname}`)}&${enc(signed)}`;
+	const key = await crypto.subtle.importKey(
+		"raw",
+		new TextEncoder().encode(`${enc(auth.consumerSecret)}&${enc(auth.tokenSecret)}`),
+		{ name: "HMAC", hash: "SHA-1" },
+		false,
+		["sign"],
+	);
+	const sig = Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(base))).toString(
+		"base64",
+	);
+	params.oauth_signature = sig;
+	return (
+		'OAuth realm="Schoology API", ' +
+		Object.entries(params)
+			.map(([k, v]) => `${k}="${enc(v)}"`)
+			.join(", ")
+	);
+};
+
 export const createSchoology = (auth: SchoologyAuth) => {
 	const wait = rateLimiter(45, 5000);
-
-	const authorization = async (method: string, url: string) => {
-		const u = new URL(url);
-		const params: Record<string, string> = {
-			oauth_consumer_key: auth.consumerKey,
-			oauth_nonce: crypto.randomUUID().replaceAll("-", ""),
-			oauth_signature_method: "HMAC-SHA1",
-			oauth_timestamp: Math.floor(Date.now() / 1000).toString(),
-			oauth_token: auth.tokenKey,
-			oauth_version: "1.0",
-		};
-		const signed = [...Object.entries(params), ...u.searchParams.entries()]
-			.map(([k, v]) => [enc(k), enc(v)])
-			.sort(([a, av], [b, bv]) => (a === b ? (av < bv ? -1 : 1) : a < b ? -1 : 1))
-			.map(([k, v]) => `${k}=${v}`)
-			.join("&");
-		const base = `${method}&${enc(`${u.protocol}//${u.host}${u.pathname}`)}&${enc(signed)}`;
-		const key = await crypto.subtle.importKey(
-			"raw",
-			new TextEncoder().encode(`${enc(auth.consumerSecret)}&${enc(auth.tokenSecret)}`),
-			{ name: "HMAC", hash: "SHA-1" },
-			false,
-			["sign"],
-		);
-		const sig = Buffer.from(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(base))).toString(
-			"base64",
-		);
-		params.oauth_signature = sig;
-		return (
-			'OAuth realm="Schoology API", ' +
-			Object.entries(params)
-				.map(([k, v]) => `${k}="${enc(v)}"`)
-				.join(", ")
-		);
-	};
 
 	/** signed GET that follows redirects correctly; returns the final Response */
 	const raw = async (url: string, timeoutMs = 60_000, retries = 0): Promise<Response> => {
@@ -79,7 +83,7 @@ export const createSchoology = (auth: SchoologyAuth) => {
 			stats.requests++;
 			const res = await fetch(current, {
 				headers: signed
-					? { accept: "application/json", authorization: await authorization("GET", current) }
+					? { accept: "application/json", authorization: await authorization(auth, "GET", current) }
 					: {},
 				redirect: "manual",
 				signal: AbortSignal.timeout(timeoutMs),

@@ -12,7 +12,8 @@
  * - Tracker runs start it headless (no display needed), let it load Drive so Google can
  *   refresh the session's rotating cookies into the profile, read the cookies over the
  *   DevTools protocol, and close it. All requests are then plain fetch().
- * - Only `pnpm google:login` opens a window: sign-in and 2FA happen there, then it closes.
+ * - Only `pnpm google:login` and `pnpm schoology:login` open a window: a person signs in
+ *   there, then it closes.
  * - A Chromium already running on the profile (you opened it) is borrowed, never closed.
  */
 
@@ -98,7 +99,11 @@ const desktopEnv = async (): Promise<Record<string, string>> => {
 	return env;
 };
 
-const launch = async (profile: string, headed: boolean): Promise<string> => {
+const launch = async (
+	profile: string,
+	headed: boolean,
+	url = "https://drive.google.com/",
+): Promise<string> => {
 	await mkdir(profile, { recursive: true });
 	await rm(join(profile, "DevToolsActivePort"), { force: true });
 	const [cmd, ...args] = (optional("CHROMIUM_COMMAND") ?? "chromium").split(/\s+/);
@@ -125,7 +130,7 @@ const launch = async (profile: string, headed: boolean): Promise<string> => {
 			"--no-default-browser-check",
 			// headed: use Wayland when the session has it, X11 otherwise
 			...(headed ? ["--ozone-platform-hint=auto"] : ["--headless=new"]),
-			"https://drive.google.com/",
+			url,
 		],
 		{ detached: true, stdio: ["ignore", out, out], env: { ...process.env, ...desktop } },
 	);
@@ -263,6 +268,26 @@ export const connectGoogle = async ({ interactive = false } = {}): Promise<Conne
 		if (browser && started) await browser.send("Browser.close").catch(() => {});
 		browser?.close();
 	}
+};
+
+/**
+ * Open `url` in a window on the profile for a person to use (a new tab if Chromium is
+ * already running there). `close` shuts the browser only if this started it.
+ */
+export const openWindow = async (url: string) => {
+	const profile = pathEnv("CHROMIUM_PROFILE_DIR");
+	if (!profile) throw new Error("CHROMIUM_PROFILE_DIR not set (see .env.example)");
+	let ws = await running(profile);
+	const started = !ws;
+	if (!ws) ws = await launch(profile, true, url);
+	const browser = await cdp(ws);
+	if (!started) await browser.send("Target.createTarget", { url });
+	return {
+		close: async () => {
+			if (started) await browser.send("Browser.close").catch(() => {});
+			browser.close();
+		},
+	};
 };
 
 /**
