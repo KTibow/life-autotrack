@@ -269,11 +269,20 @@ export const archiveFile = async (
 	return rel;
 };
 
-/** keep an archived document (its .md, images and blobs) as it is; false if there's none */
-export const keepDocument = async (store: Store, rel: string): Promise<boolean> => {
+/**
+ * keep an archived upload's document (its .md, images and blobs) as it is, with `meta`
+ * as its fields if given; false if there's none
+ */
+export const keepDocument = async (
+	store: Store,
+	rel: string,
+	meta?: Record<string, unknown>,
+): Promise<boolean> => {
 	const prev = await store.readDoc(rel);
 	const original: string | undefined = prev?.meta.source ?? prev?.meta.pdf;
 	if (!original || !store.useBlob(original)) return false;
+	const { file, source, pdf } = prev!.meta;
+	if (meta) await store.writeDoc(rel, { ...meta, file, source, pdf }, prev!.body);
 	await store.keep(rel);
 	await store.keep(`${rel.slice(0, -3)}.images`);
 	return true;

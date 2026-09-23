@@ -57,7 +57,7 @@ life/
     grades/2026-2027/0-s1-mid-term/p3-us-history.json   one file per class per reporting period
     schedule/2026-2027.json              terms and their classes
     days/2026-09/2026-09-22.json         timetable for every school day this month and next
-    attendance/ calendar/ messages.json student.json documents.json documents/
+    attendance/ calendar/ messages.json student.json documents/   (report cards etc., as .md)
 ```
 
 - **One copy of everything, trimmed.** Each object is stored once, in the file where

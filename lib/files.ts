@@ -82,7 +82,7 @@ export class Files {
 		const job = (async () => {
 			try {
 				const document = isDocument(rel);
-				if (document && (await keepDocument(this.#store, mdName(rel)))) return true;
+				if (document && (await keepDocument(this.#store, mdName(rel), meta))) return true;
 				const sha = (await linkedBlob(this.#store.abs(rel))) ?? known;
 				if (sha && !document) {
 					await this.#store.link(rel, sha);

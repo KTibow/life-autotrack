@@ -11,13 +11,15 @@
  *   calendar/<YYYY-MM>.json              school events and no-school days
  *   messages.json                        district/school notices
  *   student.json                         grade level, school, homeroom, counselor
- *   documents.json                       report cards, transcripts, …
- *   documents/<date> <type> - <comment>.pdf   → symlink into blobs/
+ *   documents/<date> <type> - <comment>.md   report cards, transcripts, …: the text, with
+ *                                        the document's fields and its PDF in the
+ *                                        frontmatter (see lib/document.ts)
  *
  * Responses are trimmed to the fields worth keeping: StudentVUE repeats every score four
  * ways and pads everything with display flags, GUIDs and relative times.
  */
 
+import { rm } from "node:fs/promises";
 import { need } from "../../lib/env.ts";
 import { log, setPhase } from "../../lib/log.ts";
 import { compact, pick } from "../../lib/pick.ts";
@@ -194,22 +196,25 @@ const archiveDocuments = async (ctx: Context, sv: Studentvue) => {
 	const docs = (await sv.maybe("GetStudentDocuments"))?.studentDocuments;
 	if (!docs) return;
 	const list: any[] = docs.studentDocumentDatas ?? [];
-	await ctx.store.writeJson(
-		"documents.json",
-		list.map((d) => pick(d, ["documentGU", "documentDate", "documentType", "documentComment"])),
-	);
+	// each document's fields live in its own frontmatter (this used to be a separate list)
+	await rm(ctx.store.abs("documents.json"), { force: true });
 	log(`  ${list.length} documents`);
 	for (const d of list) {
 		const ext = /\.[a-z0-9]{1,6}$/i.exec(d.documentFileName ?? "")?.[0] ?? ".pdf";
 		const title = `${d.documentType}${d.documentComment ? ` - ${d.documentComment}` : ""}`;
 		const name = safeName(`${isoDate(d.documentDate)} ${title}${ext}`);
-		const ok = await ctx.files.link(`documents/${name}`, async () => {
-			const content = await sv.call("GetStudentDocumentContent", { documentGU: d.documentGU });
-			const b64 = content?.studentAttachedDocumentData?.documentDatas?.[0]?.base64Code;
-			if (!b64) throw new Error("no content returned");
-			ctx.note(`new document: ${title}`);
-			return Buffer.from(b64, "base64");
-		});
+		const ok = await ctx.files.link(
+			`documents/${name}`,
+			async () => {
+				const content = await sv.call("GetStudentDocumentContent", { documentGU: d.documentGU });
+				const b64 = content?.studentAttachedDocumentData?.documentDatas?.[0]?.base64Code;
+				if (!b64) throw new Error("no content returned");
+				ctx.note(`new document: ${title}`);
+				return Buffer.from(b64, "base64");
+			},
+			null,
+			pick(d, ["documentGU", "documentDate", "documentType", "documentComment"]),
+		);
 		if (!ok) ctx.warn(`document ${d.documentGU} could not be downloaded`);
 	}
 	ctx.store.complete("documents");
