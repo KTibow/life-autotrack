@@ -12,8 +12,7 @@
  * - Tracker runs start it headless (no display needed), let it load Drive so Google can
  *   refresh the session's rotating cookies into the profile, read the cookies over the
  *   DevTools protocol, and close it. All requests are then plain fetch().
- * - Only `pnpm google:login` and `pnpm schoology:login` open a window: a person signs in
- *   there, then it closes.
+ * - Only `pnpm google:login` opens a window: sign-in and 2FA happen there, then it closes.
  * - A Chromium already running on the profile (you opened it) is borrowed, never closed.
  */
 

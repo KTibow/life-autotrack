@@ -17,8 +17,10 @@ export const API = "https://api.schoology.com/v1";
 export type SchoologyAuth = {
 	consumerKey: string;
 	consumerSecret: string;
-	tokenKey: string;
-	tokenSecret: string;
+	/** a user's access token (three-legged); without one, requests are two-legged and act as
+	 * whoever made the consumer key (the key from https://<district>.schoology.com/api) */
+	tokenKey?: string;
+	tokenSecret?: string;
 };
 
 const enc = (s: string) =>
@@ -33,8 +35,9 @@ export class SchoologyError extends Error {
 }
 
 /**
- * The OAuth 1.0a Authorization header for a request. `tokenKey` empty (the first leg of
- * `schoology:login`) leaves out oauth_token and signs with the consumer secret alone.
+ * The OAuth 1.0a Authorization header for a request. Without a `tokenKey` (two-legged, or
+ * the first leg of three-legged) it leaves out oauth_token and signs with the consumer
+ * secret alone.
  */
 export const authorization = async (auth: SchoologyAuth, method: string, url: string) => {
 	const u = new URL(url);
@@ -54,7 +57,7 @@ export const authorization = async (auth: SchoologyAuth, method: string, url: st
 	const base = `${method}&${enc(`${u.protocol}//${u.host}${u.pathname}`)}&${enc(signed)}`;
 	const key = await crypto.subtle.importKey(
 		"raw",
-		new TextEncoder().encode(`${enc(auth.consumerSecret)}&${enc(auth.tokenSecret)}`),
+		new TextEncoder().encode(`${enc(auth.consumerSecret)}&${enc(auth.tokenSecret ?? "")}`),
 		{ name: "HMAC", hash: "SHA-1" },
 		false,
 		["sign"],

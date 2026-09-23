@@ -29,15 +29,14 @@ cron it yourself, e.g.:
 Overlapping runs are safe. A facet that is already running skips (and exits 0), and
 different facets fetch in parallel but take turns committing.
 
-| command                | does                                                 |
-| ---------------------- | ---------------------------------------------------- |
-| `pnpm schoology`       | archive Schoology → `life/schoology/`                |
-| `pnpm schoology:login` | new Schoology token (approve in the Chromium window) |
-| `pnpm studentvue`      | archive StudentVUE → `life/studentvue/`              |
-| `pnpm site`            | build the site from `life/`, sync it to R2           |
-| `pnpm site:dry`        | build (and diff against R2 if credentials are set)   |
-| `pnpm site:dev`        | vite dev server over the current `life/`             |
-| `pnpm check`           | typecheck                                            |
+| command           | does                                               |
+| ----------------- | -------------------------------------------------- |
+| `pnpm schoology`  | archive Schoology → `life/schoology/`              |
+| `pnpm studentvue` | archive StudentVUE → `life/studentvue/`            |
+| `pnpm site`       | build the site from `life/`, sync it to R2         |
+| `pnpm site:dry`   | build (and diff against R2 if credentials are set) |
+| `pnpm site:dev`   | vite dev server over the current `life/`           |
+| `pnpm check`      | typecheck                                          |
 
 ## The life repo
 
@@ -46,6 +45,7 @@ life/
   blobs/<ab>/<sha256>                  every downloaded file, content-addressed, stored once
   schoology/                           one directory per facet ("scope"); facets only write here
     2026-2027/s1-p3-us-history/          <term>-p<period>-<course>, parsed from the section title
+    ongoing/robotics-club/               a section whose grading periods span years (clubs)
       section.json                         ids, titles, grading period dates
       materials/Unit 1/HW 1.md             the materials tree as folders; items are markdown
       materials/Unit 1/HW 1.attachments/   with fields as frontmatter; documents as markdown,
@@ -82,6 +82,12 @@ life/
   appears gets a relative symlink with a human name; those links are also the download
   cache (a moved item's files are recognized by name and size, not refetched). `find -lname '*<sha>'` gives every name a file has had. Blobs are marked
   `binary` so they stay out of text diffs.
+- **Big catalogs are index-only.** A section whose attachments add up to more than
+  `SCHOOLOGY_INDEX_ONLY_MB` (a club's shelf of PDFs) is decided up front, from sizes the
+  listings already give: every item is still written, with its files' metadata and a
+  `url` to its page, but nothing new is downloaded except your own submissions.
+  `section.json` says `index_only`. What was archived before stays. Section ids in
+  `SCHOOLOGY_FULL_SECTIONS` are always archived in full.
 - **Failures never look like deletions.** Stale files are only pruned from a directory
   whose data was fully fetched in that run. Past-term sections stay in place.
 - **Commits are scoped.** A facet commits only its own directory plus the blobs it

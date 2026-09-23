@@ -2,7 +2,8 @@
  * Schoology → life/schoology/, laid out like the website:
  *
  *   2026-2027/s1-p3-us-history/               <term>-p<period>-<course>, from the section title
- *     section.json                            ids, titles, grading period dates
+ *   ongoing/robotics-club/                    a section whose grading periods span years (clubs)
+ *     section.json                            ids, titles, grading period dates, index_only
  *     materials/                              the materials tree, as folders
  *       Unit 1/
  *         Notes.md                            a page: body as markdown, fields as frontmatter
@@ -38,6 +39,10 @@ import { createSchoology, SchoologyError, type Schoology } from "./client.ts";
 
 const WEB = `https://${optional("SCHOOLOGY_HOST") ?? "app.schoology.com"}`;
 const MAX_FILE_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
+/** a section whose attachments add up to more than this is index-only (see archiveSection) */
+const INDEX_ONLY_BYTES = Number(optional("SCHOOLOGY_INDEX_ONLY_MB") ?? 500) * 1024 * 1024;
+/** section ids that are always archived in full, whatever their size */
+const FULL_SECTIONS = new Set((optional("SCHOOLOGY_FULL_SECTIONS") ?? "").split(",").map((id) => id.trim()));
 
 /** 403/404 on a listing means "not available in this section", not a failure */
 const orEmpty = async <T>(p: Promise<T[]>): Promise<T[]> => {
@@ -58,6 +63,25 @@ const stamp = (unix: number | string) =>
 const schoolYear = (iso: string) => {
 	const [y, m] = iso.split("-").map(Number);
 	return m >= 7 ? `${y}-${y + 1}` : `${y - 1}-${y}`;
+};
+
+/**
+ * The top-level directory for a section, from its grading periods: the school year they
+ * start in, or "ongoing" when they span more than a year (clubs sit in one "Ongoing
+ * Student Learning" period, 2021-06-16 to 2040-07-31). No periods: this school year.
+ */
+const yearDir = (periods: any[]) => {
+	const starts = periods
+		.map((p) => String(p.start ?? "").slice(0, 10))
+		.filter(Boolean)
+		.sort();
+	const ends = periods
+		.map((p) => String(p.end ?? "").slice(0, 10))
+		.filter(Boolean)
+		.sort();
+	if (starts.length && ends.length && Date.parse(ends.at(-1)!) - Date.parse(starts[0]) > 400 * 86_400_000)
+		return "ongoing";
+	return schoolYear(starts[0] || new Date().toLocaleDateString("sv-SE"));
 };
 
 /** "(S1) LASTNAME, F  US HISTORY(3)" + "US HISTORY" → "s1-p3-us-history" */
@@ -90,6 +114,16 @@ const FIELDS: Record<string, string[]> = {
 	document: ["title"],
 };
 
+/** an item's page on the website: the way to it in an index-only section */
+const webUrl = (sid: string, type: string, id: unknown) =>
+	type === "assignment"
+		? `${WEB}/assignment/${id}/info`
+		: type === "page"
+			? `${WEB}/page/${id}`
+			: type === "update"
+				? `${WEB}/course/${sid}/updates`
+				: `${WEB}/course/${sid}/materials/gp/${id}`;
+
 const trimComments = (comments: any[]) =>
 	comments.map((c) => pick(c, ["id", "uid", "parent_id", "created", "comment"]));
 
@@ -104,6 +138,7 @@ const archiveSection = async (
 	uid: string,
 	section: Section,
 	dir: string,
+	periods: any[],
 ) => {
 	const sid = String(section.id);
 	const course = section.course_title;
@@ -135,6 +170,25 @@ const archiveSection = async (
 			`${discussions.length} discussions, ${updates.length} updates, ${events.length} events`,
 	);
 
+	// A section with a big catalog (a club's shelf of PDFs) is index-only, decided up front
+	// from sizes the listings already give: every item is still written, with its fields,
+	// its files' metadata and a `url` to its page, but nothing new is downloaded (Drive
+	// links included). Your own submissions are the exception. Whatever was archived
+	// before stays, so a section that grows past the line loses nothing.
+	const bytes = [...assignments, ...pages, ...documents, ...discussions, ...updates]
+		.flatMap((it) => it.attachments?.files?.file ?? [])
+		.reduce((n, f) => n + (Number(f.filesize) || 0), 0);
+	const indexOnly = bytes > INDEX_ONLY_BYTES && !FULL_SECTIONS.has(sid);
+	if (indexOnly) log(`  ${label}: index-only (${mb(bytes)} of attachments > SCHOOLOGY_INDEX_ONLY_MB)`);
+	await store.writeJson(
+		`${dir}/section.json`,
+		compact({
+			...pick(section, ["id", "course_id", "course_title", "section_title"]),
+			grading_periods: periods.map((p: any) => pick(p, ["title", "start", "end"])),
+			index_only: indexOnly || undefined,
+		}),
+	);
+
 	// what was here last run, by type:id, so new things get noted even if they also moved
 	const before = new Set<string>();
 	const walkMd = async (rel: string) => {
@@ -152,13 +206,18 @@ const archiveSection = async (
 	// files already archived anywhere in this section, so moving an item between folders
 	// doesn't mean downloading its files again
 	const known = await files.scan(dir);
-	const linkFile = async (rel: string, file: any) => {
+	/** false when the file isn't archived (too big, failed, or index-only and not fetched before) */
+	const linkFile = async (rel: string, file: any, always = false): Promise<boolean> => {
 		const size = Number(file.filesize) || 0;
-		if (size > MAX_FILE_BYTES) return log(`  skipping ${file.filename} (${mb(size)} > MAX_FILE_MB)`);
+		if (size > MAX_FILE_BYTES) {
+			log(`  skipping ${file.filename} (${mb(size)} > MAX_FILE_MB)`);
+			return false;
+		}
 		const name = rel.slice(rel.lastIndexOf("/") + 1);
-		await files.link(
+		return files.link(
 			rel,
-			async () => (file.download_path ? await sc.download(file.download_path) : null),
+			async () =>
+				(!indexOnly || always) && file.download_path ? await sc.download(file.download_path) : null,
 			known.get(`${name}\0${size}`),
 			{ type: "file", id: file.id },
 		);
@@ -186,6 +245,16 @@ const archiveSection = async (
 		);
 		const drive = [];
 		for (const { url, ref } of refs.values()) {
+			if (indexOnly) {
+				// keep a copy synced before, but don't sync anything
+				const file = previous.get(url);
+				if (file && store.exists(`${base}.attachments/${file}`) && name.claim(file)) {
+					await store.keep(`${base}.attachments/${file}`);
+					await store.keep(`${base}.attachments/${file.replace(/\.[^.]+$/, "")}.attachments`);
+					drive.push({ url, file });
+				} else drive.push({ url });
+				continue;
+			}
 			const file = await syncDrive(
 				{ store, files, google: await google() },
 				ref,
@@ -217,7 +286,8 @@ const archiveSection = async (
 		if (firstSeen(type, obj.id) && (type === "assignment" || type === "page"))
 			ctx.note(`new ${type} in ${course}: ${obj.title}`);
 
-		// a document that is only a single file is that file
+		// a document that is only a single file is that file (index-only and not archived
+		// before: an item like any other, with the file's metadata and a url)
 		const docFiles = obj.attachments?.files?.file ?? [];
 		if (type === "document" && docFiles.length === 1 && !obj.attachments?.links?.link?.length) {
 			const f = docFiles[0];
@@ -225,7 +295,7 @@ const archiveSection = async (
 			const title: string = obj.title ?? "";
 			const stem =
 				ext && title.toLowerCase().endsWith(ext.toLowerCase()) ? title.slice(0, -ext.length) : title;
-			return linkFile(`${folder}/${name(stem || f.filename, ext)}`, f);
+			if ((await linkFile(`${folder}/${name(stem || f.filename, ext)}`, f)) || !indexOnly) return;
 		}
 
 		const base = `${folder}/${name(obj.title)}`;
@@ -234,6 +304,7 @@ const archiveSection = async (
 			id: obj.id,
 			...pick(obj, FIELDS[type] ?? ["title"]),
 			attachments: attachments(obj.attachments),
+			url: indexOnly ? webUrl(sid, type, obj.id) : undefined,
 		});
 		if (type === "assignment" && Number(obj.allow_dropbox) && obj.grade_item_id) {
 			// your own submission history
@@ -249,7 +320,7 @@ const archiveSection = async (
 				for (const f of r.attachments?.files?.file ?? []) {
 					const n = subName(`${r.created ? `${stamp(r.created)} ` : ""}${f.filename || f.title || f.id}`);
 					names.push(n);
-					await linkFile(`${base}.submissions/${n}`, f);
+					await linkFile(`${base}.submissions/${n}`, f, true);
 				}
 				subs.push(compact({ ...pick(r, ["revision_id", "created", "late", "draft", "body"]), files: names }));
 			}
@@ -302,6 +373,7 @@ const archiveSection = async (
 				...pick(u, ["uid", "created", "last_updated", "poll"]),
 				attachments: attachments(u.attachments),
 				drive,
+				url: indexOnly ? webUrl(sid, "update", u.id) : undefined,
 			}),
 			md(u.body),
 		);
@@ -325,8 +397,9 @@ await track("schoology", async (ctx) => {
 	const sc = createSchoology({
 		consumerKey: need("SCHOOLOGY_CONSUMER_KEY"),
 		consumerSecret: need("SCHOOLOGY_CONSUMER_SECRET"),
-		tokenKey: need("SCHOOLOGY_TOKEN_KEY"),
-		tokenSecret: need("SCHOOLOGY_TOKEN_SECRET"),
+		// two-legged: Schoology's three-legged flow is broken for new tokens (see login.ts)
+		// tokenKey: need("SCHOOLOGY_TOKEN_KEY"),
+		// tokenSecret: need("SCHOOLOGY_TOKEN_SECRET"),
 	});
 	const { store } = ctx;
 	setPhase("looking up user");
@@ -355,24 +428,12 @@ await track("schoology", async (ctx) => {
 		showPhase();
 		try {
 			const periods = await orEmpty(sc.all(`/sections/${s.id}/grading_periods`, "grading_period"));
-			const starts = periods
-				.map((p: any) => String(p.start ?? ""))
-				.filter(Boolean)
-				.sort();
-			const year = schoolYear(starts[0]?.slice(0, 10) || new Date().toLocaleDateString("sv-SE"));
-			let dir = `${year}/${sectionName(s)}`;
+			let dir = `${yearDir(periods)}/${sectionName(s)}`;
 			if (taken.has(dir)) dir += `-${s.id}`;
 			taken.add(dir);
 			const prev = existing.get(String(s.id));
 			if (prev && prev !== dir && (await store.move(prev, dir))) log(`  moved ${prev} → ${dir}`);
-			await store.writeJson(
-				`${dir}/section.json`,
-				compact({
-					...pick(s, ["id", "course_id", "course_title", "section_title"]),
-					grading_periods: periods.map((p: any) => pick(p, ["title", "start", "end"])),
-				}),
-			);
-			await archiveSection(ctx, sc, google, uid, s, dir);
+			await archiveSection(ctx, sc, google, uid, s, dir, periods);
 			tick(`${s.course_title} done`);
 		} catch (e) {
 			tick(`${s.course_title} FAILED`);
