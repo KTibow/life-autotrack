@@ -94,7 +94,10 @@ cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
   ever lapses, runs skip Drive, keep what's archived, and say to run `google:login`.
 - The profile runs with `--password-store=basic`, so it doesn't depend on a desktop
   keyring and can be signed in on one machine and copied to another.
-- Docs → `.md`, Sheets → `.xlsx`, Slides → `.pdf`, Drawings → `.png`, uploads as
+- Links inside those files (a Doc's links, a deck's hyperlinks and speaker notes, a
+  Sheet's cells) are followed too, into `<file>.attachments/`, up to
+  `DRIVE_LINK_DEPTH` hops.
+- Docs → `.md`, Sheets → `.xlsx`, Slides → `.pptx` (keeps speaker notes), Drawings → `.png`, uploads as
   uploaded, folders as directories. Exports are normalized so an unchanged file
   re-exports to identical bytes; Google-native files are rechecked when their folder
   says they changed, or every `DRIVE_RECHECK_HOURS`.

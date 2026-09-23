@@ -174,6 +174,27 @@ export const officeFingerprint = (bytes: Uint8Array): string | null => {
 };
 
 /**
+ * Drive links inside an exported file: a Doc's markdown, or the XML parts of an Office
+ * file (slide text, speaker notes, cells, and the external hyperlink targets in *.rels).
+ * PDFs and other uploads aren't looked into.
+ */
+export const linksInExport = (name: string, bytes: Uint8Array): string[] => {
+	if (/\.md$/i.test(name))
+		// Docs' markdown escapes _ and friends, including inside URLs
+		return driveLinksIn(
+			Buffer.from(bytes)
+				.toString("utf8")
+				.replace(/\\([_*~\-#])/g, "$1"),
+		);
+	if (!/\.(pptx|xlsx|docx)$/i.test(name)) return [];
+	const entries = readZip(bytes);
+	if (!entries) return [];
+	return [...entries]
+		.filter(([n]) => /\.(xml|rels)$/.test(n))
+		.flatMap(([, data]) => driveLinksIn(data.toString("utf8")));
+};
+
+/**
  * The file's bytes and Drive title, or null when this account can't see it (not shared,
  * deleted) or there's nothing to download (Forms).
  */

@@ -10,6 +10,8 @@
  *   state that never reaches git. A re-export whose content matches the archived copy
  *   (ignoring Office packing noise, see officeFingerprint) changes nothing.
  * - with no Google session, or on an error, whatever was archived before is kept as is
+ * - Drive links inside a synced Doc/Sheet/deck are followed into `<file>.attachments/`,
+ *   refreshed whenever that file is re-exported, up to DRIVE_LINK_DEPTH hops
  */
 
 import { lstat, lutimes } from "node:fs/promises";
@@ -23,8 +25,10 @@ import {
 	downloadDrive,
 	EXT,
 	isNative,
+	linksInExport,
 	listFolder,
 	officeFingerprint,
+	parseDriveUrl,
 	type DriveRef,
 	type FolderEntry,
 } from "./drive.ts";
@@ -32,8 +36,43 @@ import {
 const RECHECK_MS = Number(optional("DRIVE_RECHECK_HOURS") ?? 12) * 3600_000;
 const MAX_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
 const MAX_FOLDER_FILES = Number(optional("DRIVE_MAX_FOLDER_FILES") ?? 2000);
+const MAX_LINK_DEPTH = Number(optional("DRIVE_LINK_DEPTH") ?? 2);
 
-export type DriveContext = { store: Store; files: Files; google: Google | null };
+export type DriveContext = {
+	store: Store;
+	files: Files;
+	google: Google | null;
+	/** Drive ids on the current chain of links (a doc linking to a doc linking back stops) */
+	chain?: Set<string>;
+};
+
+const stem = (name: string) => name.replace(/\.[^.]+$/, "");
+
+/**
+ * Files linked from inside a synced file (a Doc's links, a deck's hyperlinks and speaker
+ * notes) go next to it in `<name>.attachments/`, like a Schoology item's. `bytes` null
+ * means the file wasn't re-exported this run: keep what was synced from it last time.
+ */
+const syncLinkedFrom = async (
+	ctx: DriveContext,
+	ref: DriveRef,
+	dir: string,
+	name: string,
+	bytes: Uint8Array | null,
+) => {
+	const sub = `${dir}/${stem(name)}.attachments`;
+	const chain = ctx.chain ?? new Set<string>();
+	if (!bytes || chain.size >= MAX_LINK_DEPTH) return ctx.store.keep(sub);
+	const refs = new Map<string, DriveRef>();
+	for (const url of linksInExport(name, bytes)) {
+		const r = parseDriveUrl(url);
+		if (r && r.id !== ref.id && !chain.has(r.id)) refs.set(r.id, r);
+	}
+	if (!refs.size) return;
+	const inner = { ...ctx, chain: new Set([...chain, ref.id]) };
+	const names = namer();
+	for (const r of refs.values()) await syncDrive(inner, r, sub, names);
+};
 
 /** "6/25/22", "Apr 11", "10:31 AM" (today) → epoch ms, or undefined */
 const listingTime = (s?: string): number | undefined => {
@@ -82,6 +121,7 @@ const syncFile = async (
 			(Date.now() - checked < RECHECK_MS && (listingTime(opts.modified) ?? 0) <= checked));
 	if (guess && checked !== undefined && (fresh || !google) && name.claim(guess)) {
 		await store.keep(`${dir}/${guess}`);
+		await syncLinkedFrom(ctx, ref, dir, guess, null);
 		return guess;
 	}
 	if (!google) return null;
@@ -91,6 +131,7 @@ const syncFile = async (
 	});
 	if (got === undefined && guess && checked !== undefined && name.claim(guess)) {
 		await store.keep(`${dir}/${guess}`); // transient failure: keep last run's copy
+		await syncLinkedFrom(ctx, ref, dir, guess, null);
 		return guess;
 	}
 	if (!got) return null; // no access, or nothing to download (Forms)
@@ -105,6 +146,7 @@ const syncFile = async (
 		if (old && officeFingerprint(old) === officeFingerprint(got.bytes)) {
 			await store.link(rel, before);
 			await markChecked(store, rel);
+			await syncLinkedFrom(ctx, ref, dir, final, got.bytes);
 			return final;
 		}
 	}
@@ -116,6 +158,7 @@ const syncFile = async (
 		log(`  ↓ ${final} (Drive${before ? ", changed" : ""})`);
 	}
 	await markChecked(store, rel);
+	await syncLinkedFrom(ctx, ref, dir, final, got.bytes);
 	return final;
 };
 
