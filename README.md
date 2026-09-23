@@ -1,0 +1,126 @@
+# life-autotrack
+
+Archives the places school life happens (Schoology, StudentVUE, more later) into a
+local git repo, `life/`, as pretty JSON plus markdown digests. Every run that finds a
+change makes one commit, so anything watching the repo (a `post-commit` hook, an
+openclaw-style bot polling `git log`) can react to diffs. Optionally publishes a small
+private site of the current state to R2.
+
+## Setup
+
+```sh
+mkdir life
+git clone https://github.com/KTibow/life-autotrack
+cd life && git init && cd ..
+cd life-autotrack && pnpm install && cp .env.example .env   # then fill in .env
+```
+
+Node ≥ 24 (TypeScript runs natively, with no build step). Then cron it yourself, e.g.:
+
+```cron
+*/30 6-22 * * *  cd ~/life-autotrack && pnpm -s schoology
+*/15 6-22 * * *  cd ~/life-autotrack && pnpm -s studentvue
+5,35 6-22 * * *  cd ~/life-autotrack && pnpm -s site
+```
+
+Overlapping runs are safe. A facet that is already running skips (and exits 0), and
+different facets fetch in parallel but take turns committing.
+
+| command           | does                                               |
+| ----------------- | -------------------------------------------------- |
+| `pnpm schoology`  | archive Schoology → `life/schoology/`              |
+| `pnpm studentvue` | archive StudentVUE → `life/studentvue/`            |
+| `pnpm site`       | build the site from `life/`, sync it to R2         |
+| `pnpm site:dry`   | build (and diff against R2 if credentials are set) |
+| `pnpm site:dev`   | vite dev server over the current `life/`           |
+| `pnpm check`      | typecheck                                          |
+
+## The life repo
+
+```
+life/
+  blobs/<ab>/<sha256>                  every downloaded file, content-addressed, stored once
+  schoology/                           one directory per facet ("scope"); facets only write here
+    2026-2027/s1-p3-us-history/          <term>-p<period>-<course>, parsed from the section title
+      section.json                         ids, titles, grading period dates
+      materials/Unit 1/HW 1.md             the materials tree as folders; items are markdown
+      materials/Unit 1/HW 1.attachments/   with fields as frontmatter; files are symlinks,
+                                           incl. linked Google Docs (.md), Sheets (.xlsx),
+                                           Slides (.pdf) and whole linked Drive folders
+      materials/Unit 1/HW 1.submissions/   your own submitted files
+      materials/Unit 1/Syllabus.pdf        a document that is just a file
+      updates/2026-09-22 14-05.md  events/2026-10-01 Field trip.md
+  studentvue/
+    grades/2026-2027/0-s1-mid-term/p3-us-history.json   one file per class per reporting period
+    schedule/2026-2027.json              terms and their classes
+    days/2026-09/2026-09-22.json         timetable for every school day this month and next
+    attendance/ calendar/ messages.json student.json documents.json documents/
+```
+
+- **One copy of everything, trimmed.** Each object is stored once, in the file where
+  you'd look for it, as the source's own fields (original names) minus what nobody
+  would read or count: repeated score formats, display flags, GUIDs, relative times,
+  empty values. There are no digests or summary files; if a view feels necessary, the
+  original is trimmed further instead. Prose (assignment descriptions, pages, updates)
+  is the body of a markdown file whose frontmatter holds the other fields, one
+  `key: <json>` per line, so text diffs read like text.
+- **Laid out like the source.** `tree life/schoology` looks like the website: courses
+  you can find with one `ls`, folders and items by their titles. Every markdown file's
+  frontmatter carries the source's `type` and `id`. Grades live only in StudentVUE.
+- **Files have many names.** Bytes live once in `blobs/` (sha256). Each place a file
+  appears gets a relative symlink with a human name; those links are also the download
+  cache (a moved item's files are recognized by name and size, not refetched). `find -lname '*<sha>'` gives every name a file has had. Blobs are marked
+  `binary` so they stay out of text diffs.
+- **Failures never look like deletions.** Stale files are only pruned from a directory
+  whose data was fully fetched in that run. Past-term sections stay in place.
+- **Commits are scoped.** A facet commits only its own directory plus the blobs it
+  references (`git commit --only`), so your own staged work is never swept in. It
+  won't commit during a merge or rebase. The author is `life-autotrack`, and the
+  subject line summarizes the change, e.g. `studentvue: Algebra 2: 88.0 → 90.5 (B+)
+and 1 more · +0 ~1 -0`, with the full change list in the body.
+- **Progress is logged** with elapsed time, plus a heartbeat every 15s during a run.
+
+## Google (Drive links)
+
+Links to Drive in Schoology (attached, or in an item's text) are followed and archived
+next to the item, named as they're named in Drive. There's no OAuth app: requests use the
+cookies of a real Chromium running on a profile of its own (`CHROMIUM_PROFILE_DIR`).
+
+- `pnpm google:login` starts that browser in a window. Sign in there (2FA and all).
+  The browser stays open between runs, which keeps Google's cookies fresh; if it ever
+  gets signed out, runs skip Drive, keep what's archived, and reopen the sign-in page,
+  so plugging in a monitor and signing in is the whole fix.
+- The profile runs with `--password-store=basic`, so it doesn't depend on a desktop
+  keyring and can be signed in on one machine and copied to another.
+- Docs → `.md`, Sheets → `.xlsx`, Slides → `.pdf`, Drawings → `.png`, uploads as
+  uploaded, folders as directories. Exports are normalized so an unchanged file
+  re-exports to identical bytes; Google-native files are rechecked when their folder
+  says they changed, or every `DRIVE_RECHECK_HOURS`.
+
+## Adding a facet
+
+```ts
+// facets/web/index.ts
+import { pick } from "../../lib/pick.ts";
+import { track } from "../../lib/track.ts";
+
+await track("web", async ({ store, files, note, warn }) => {
+	await store.writeJson("thing.json", pick(data, ["id", "title"])); // → life/web/thing.json
+	await store.writeDoc("pages/1.md", { id: 1, title }, markdown); // prose + frontmatter
+	await files.link("files/page.pdf", () => download(u)); // fetched only if no link exists yet
+	note("thing changed"); // becomes the commit subject
+	store.complete("."); // everything under life/web/ was fetched: prune leftovers
+});
+```
+
+`lib/` covers the hard parts: `lock.ts` (stale-safe cross-process locks), `store.ts`
+(scoped atomic writes, blobs, symlinks, pruning), `files.ts` (download cache),
+`git.ts` (scoped commits), `track.ts` (ties it together).
+
+## Site
+
+`site/` is plain Vite. `index.html` carries every class's data inline as JSON (it's the
+only file that changes when data does, served `no-cache`). The JS/CSS are
+content-hashed and `immutable`, so switching classes (hash routes, ←/→) never hits the
+network. It's uploaded under `PUBLISH_PREFIX/` in the bucket, and only changed files
+are PUT. Files in `blobs/` are never uploaded; links go to Schoology.

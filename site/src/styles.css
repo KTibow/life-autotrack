@@ -1,0 +1,200 @@
+:root {
+	color-scheme: light dark;
+	--bg: #fbfbfd;
+	--fg: #1b1c1f;
+	--muted: #5d6068;
+	--line: #e3e4ea;
+	--accent: #3b6ea8;
+	--chip: #e6eef8;
+	--bad: #b3261e;
+	font:
+		16px/1.5 system-ui,
+		-apple-system,
+		"Segoe UI",
+		sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #131417;
+		--fg: #e4e5ea;
+		--muted: #9a9ca5;
+		--line: #2a2c31;
+		--accent: #9cc2f0;
+		--chip: #1f2a38;
+		--bad: #f2b8b5;
+	}
+}
+* {
+	box-sizing: border-box;
+}
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+}
+a {
+	color: var(--accent);
+	text-decoration: none;
+}
+a:hover {
+	text-decoration: underline;
+}
+.page {
+	max-width: 52rem;
+	margin: 0 auto;
+	padding: 1.5rem 1rem 5rem;
+	display: grid;
+	gap: 1.5rem;
+}
+h1 {
+	margin: 0;
+	font-size: 1.6rem;
+}
+h2 {
+	margin: 0 0 0.5rem;
+	font-size: 1rem;
+	color: var(--muted);
+	font-weight: 600;
+}
+header p {
+	margin: 0.25rem 0 0;
+}
+.muted {
+	color: var(--muted);
+	font-size: 0.9rem;
+}
+.tnum {
+	font-variant-numeric: tabular-nums;
+}
+.class-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.class-list li {
+	padding: 0.6rem 0;
+	border-bottom: 1px solid var(--line);
+}
+.class-list a {
+	display: flex;
+	gap: 0.75rem;
+	align-items: baseline;
+	color: inherit;
+}
+.class-list .period {
+	width: 1.5rem;
+	color: var(--muted);
+}
+.class-list .name {
+	flex: 1;
+}
+.class-list .next {
+	padding-left: 2.25rem;
+}
+.chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+}
+.chip {
+	display: flex;
+	gap: 0.5rem;
+	align-items: baseline;
+	padding: 0.5rem 0.8rem;
+	border-radius: 0.75rem;
+	background: var(--chip);
+	color: inherit;
+	font-size: 0.9rem;
+}
+.due {
+	color: var(--muted);
+	font-size: 0.8rem;
+	margin-left: 0.5rem;
+}
+table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.9rem;
+}
+td,
+th {
+	text-align: left;
+	padding: 0.35rem 0.5rem 0.35rem 0;
+	border-bottom: 1px solid var(--line);
+	vertical-align: top;
+}
+tr.missing td {
+	color: var(--bad);
+}
+details > summary {
+	cursor: pointer;
+	padding: 0.3rem 0;
+}
+.materials {
+	list-style: none;
+	margin: 0;
+	padding-left: 0;
+}
+.materials .materials {
+	padding-left: 1.1rem;
+	border-left: 1px solid var(--line);
+}
+.materials li {
+	padding: 0.15rem 0;
+}
+.m-folder > details > summary {
+	font-weight: 600;
+}
+.rich {
+	overflow-wrap: anywhere;
+	padding: 0.25rem 0 0.5rem;
+}
+.rich > :first-child {
+	margin-top: 0;
+}
+.rich > :last-child {
+	margin-bottom: 0;
+}
+.rich img {
+	max-width: 100%;
+	height: auto;
+}
+.rich table {
+	display: block;
+	overflow-x: auto;
+}
+.out {
+	font-size: 0.85rem;
+}
+.update {
+	padding: 0.75rem 0;
+	border-bottom: 1px solid var(--line);
+}
+.controls {
+	position: fixed;
+	bottom: 0;
+	left: 0;
+	right: 0;
+	display: flex;
+	gap: 0.25rem;
+	padding: 0.5rem;
+	background: color-mix(in srgb, var(--bg) 85%, transparent);
+	backdrop-filter: blur(8px);
+	border-top: 1px solid var(--line);
+}
+.controls a {
+	padding: 0.5rem 1rem;
+	border-radius: 0.75rem;
+	background: var(--chip);
+	color: inherit;
+}
+.controls .main {
+	flex: 1;
+	text-align: center;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+footer {
+	margin-top: 1rem;
+}

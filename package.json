@@ -1,0 +1,40 @@
+{
+	"name": "life-autotrack",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"schoology": "node facets/schoology/index.ts",
+		"studentvue": "node facets/studentvue/index.ts",
+		"google:login": "node facets/google-login.ts",
+		"site": "node site/publish.ts",
+		"site:dry": "node site/publish.ts --dry",
+		"site:dev": "vite site",
+		"check": "tsc",
+		"format": "prettier --write .",
+		"lint": "prettier --check ."
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"devEngines": {
+		"packageManager": {
+			"name": "pnpm",
+			"version": "^11.1.1",
+			"onFail": "download"
+		}
+	},
+	"dependencies": {
+		"aws4fetch": "^1.0.20",
+		"marked": "^18.0.13",
+		"node-html-markdown": "^2.0.0",
+		"sanitize-html": "^2.17.7"
+	},
+	"devDependencies": {
+		"@types/node": "^26.6.2",
+		"@types/sanitize-html": "^2.16.1",
+		"prettier": "^3.9.8",
+		"typescript": "^7.0.2",
+		"vite": "^8.3.0"
+	}
+}
