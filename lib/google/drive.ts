@@ -1,13 +1,15 @@
 /**
  * Google Drive through a browser session (see browser.ts), without the Drive API:
  *
- * - Google-native files are exported: Docs → .md (diffable), Sheets → .xlsx, Slides → .pptx
- *   (keeps speaker notes), Drawings → .png. Forms have no export and are skipped.
+ * - Google-native files are exported: Docs and Slides → .md (see lib/document.ts; their PDF
+ *   export goes in its frontmatter), Sheets → .xlsx, Drawings → .png. Forms have no export
+ *   and are skipped.
  * - Docs come from the HTML zip export, not Google's markdown: that one inlines images as
  *   base64 downscaled to 720px and drops floating images. The zip has the originals; the
- *   markdown is made from its HTML, images go next to it numbered in document order, and
- *   a Doc that's only images becomes just its images. All tabs are included (the default
- *   export concatenates them).
+ *   markdown is made from its HTML, images go next to it numbered in document order. All
+ *   tabs are included (the default export concatenates them).
+ * - Slides come from the .pptx export through markitdown (text, tables, speaker notes and
+ *   images, slide by slide).
  * - Uploaded files come from drive.usercontent.google.com (confirm=t skips the virus-scan
  *   interstitial on big files).
  * - Folders are listed with embeddedfolderview (ids, types, titles, modified dates).
@@ -19,6 +21,7 @@
 import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { NodeHtmlMarkdown } from "node-html-markdown";
+import { IMAGES_DIR, officeToDoc, type Doc } from "../document.ts";
 import type { Google } from "./browser.ts";
 
 export type DriveKind =
@@ -66,10 +69,14 @@ const EXPORTS: Partial<Record<DriveKind, (id: string) => string>> = {
 	drawings: (id) => `https://docs.google.com/drawings/d/${id}/export/png`,
 	file: (id) => `https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t`,
 };
+const PDF_EXPORTS: Partial<Record<DriveKind, (id: string) => string>> = {
+	document: (id) => `https://docs.google.com/document/d/${id}/export?format=pdf`,
+	presentation: (id) => `https://docs.google.com/presentation/d/${id}/export/pdf`,
+};
 export const EXT: Partial<Record<DriveKind, string>> = {
 	document: ".md",
 	spreadsheets: ".xlsx",
-	presentation: ".pptx",
+	presentation: ".md",
 	drawings: ".png",
 };
 /** Google-native kinds change in place, so they're re-exported; uploads are fetched once */
@@ -209,7 +216,7 @@ export const officeCanonical = (bytes: Uint8Array): [string, Buffer][] | null =>
 /**
  * Drive links inside an exported file: a Doc's markdown, or the XML parts of an Office
  * file (slide text, speaker notes, cells, and the external hyperlink targets in *.rels).
- * PDFs and other uploads aren't looked into.
+ * PDFs aren't looked into.
  */
 export const linksInExport = (name: string, bytes: Uint8Array): string[] => {
 	if (/\.md$/i.test(name))
@@ -240,22 +247,19 @@ export const unwrapRedirects = (html: string) =>
 		}
 	});
 
-/** where a Doc's images end up relative to its .md: filled in once the final name is known */
-export const IMAGES_DIR = "\u0001images\u0001";
-
 export type Exported = {
+	/** the file's name in Drive, with the export's extension (.md for a Doc, .pptx for Slides) */
 	name: string;
+	/** what was downloaded (for a Doc, its markdown) */
 	bytes: Uint8Array;
-	/** a Doc's images, in document order (01.png, 02.jpg, …) */
-	images?: { name: string; bytes: Uint8Array }[];
-	/** the Doc has (next to) no text: archive just its images */
-	imagesOnly?: boolean;
+	/** a Doc or deck as markdown */
+	doc?: Doc;
 };
 
 const nhm = new NodeHtmlMarkdown({ keepDataImages: false, useLinkReferenceDefinitions: false });
 
 /** a Docs HTML zip → markdown whose images point at IMAGES_DIR/NN.ext, and those images */
-const docFromZip = (zip: Uint8Array): Pick<Exported, "bytes" | "images" | "imagesOnly"> | null => {
+const docFromZip = (zip: Uint8Array): Doc | null => {
 	const entries = readZip(zip);
 	const htmlName = entries && [...entries.keys()].find((n) => n.endsWith(".html"));
 	if (!entries || !htmlName) return null;
@@ -273,14 +277,11 @@ const docFromZip = (zip: Uint8Array): Pick<Exported, "bytes" | "images" | "image
 	html = html.replace(/src="(images\/[^"]+)"/g, (m, n) =>
 		renamed.has(n) ? `src="${IMAGES_DIR}/${renamed.get(n)}"` : m,
 	);
-	const md = nhm.translate(html).trim() + "\n";
-	const text = md.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[^\p{L}\p{N}]/gu, "");
 	return {
-		bytes: Buffer.from(md),
+		body: nhm.translate(html).trim(),
 		images: order
 			.filter((n) => entries.has(n))
 			.map((n) => ({ name: renamed.get(n)!, bytes: entries.get(n)! })),
-		imagesOnly: order.length > 0 && text.length < 10,
 	};
 };
 
@@ -297,7 +298,7 @@ export const downloadDrive = async (
 	if (!url) return null;
 	const res = await g.fetch(url, { maxBytes });
 	if (!res) return null;
-	if (res.status === 404 || res.status === 403 || res.status === 401) {
+	if (res.status === 404 || res.status === 410 || res.status === 403 || res.status === 401) {
 		await res.body?.cancel();
 		return null;
 	}
@@ -312,13 +313,28 @@ export const downloadDrive = async (
 	}
 	let bytes: Uint8Array = new Uint8Array(await res.arrayBuffer());
 	if (ref.kind === "spreadsheets" || ref.kind === "presentation") bytes = normalizeZip(bytes);
-	const name = filenameOf(res) ?? `${ref.id}${EXT[ref.kind] ?? ""}`;
+	const name = filenameOf(res) ?? `${ref.id}${ref.kind === "presentation" ? ".pptx" : (EXT[ref.kind] ?? "")}`;
 	if (ref.kind === "document") {
 		const doc = docFromZip(bytes);
 		if (!doc) throw new Error("unreadable Docs export");
-		return { name: `${name.replace(/\.zip$/i, "")}.md`, ...doc };
+		return { name: `${name.replace(/\.zip$/i, "")}.md`, bytes: Buffer.from(doc.body), doc };
 	}
+	// a deck that can't be converted (markitdown unavailable) is kept as the .pptx
+	if (ref.kind === "presentation")
+		return { name, bytes, doc: (await officeToDoc(bytes, ".pptx")) ?? undefined };
 	return { name, bytes };
+};
+
+/** a Doc or deck as PDF, or null if there's none to get */
+export const downloadPdf = async (g: Google, ref: DriveRef): Promise<Uint8Array | null> => {
+	const url = PDF_EXPORTS[ref.kind]?.(ref.id);
+	const res = url ? await g.fetch(url) : null;
+	if (!res?.ok || !(res.headers.get("content-type") ?? "").includes("pdf")) {
+		await res?.body?.cancel();
+		if (res && !res.ok && ![403, 404, 410].includes(res.status)) throw new Error(`HTTP ${res.status}`);
+		return null;
+	}
+	return new Uint8Array(await res.arrayBuffer());
 };
 
 export type FolderEntry = DriveRef & { title: string; modified?: string };

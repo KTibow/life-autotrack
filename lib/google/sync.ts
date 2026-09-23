@@ -10,6 +10,8 @@
  *   state that never reaches git. A re-export whose content matches the archived copy
  *   (ignoring Office packing noise, see officeFingerprint) changes nothing.
  * - with no Google session, or on an error, whatever was archived before is kept as is
+ * - Docs, decks and uploaded documents (PDF, Word, PowerPoint) become `<title>.md` with
+ *   their PDF in the frontmatter (see lib/document.ts)
  * - Drive links inside a synced Doc/Sheet/deck are followed into `<file>.attachments/`,
  *   refreshed whenever that file is re-exported, up to DRIVE_LINK_DEPTH hops
  */
@@ -19,17 +21,19 @@ import { optional } from "../env.ts";
 import { pool } from "../http.ts";
 import type { Files } from "../files.ts";
 import { log, logWarn, stats } from "../log.ts";
+import { archiveFile, isDocument, mdName, saveDocument } from "../document.ts";
 import { namer, type Namer, type Store } from "../store.ts";
 import type { Google } from "./browser.ts";
 import {
 	downloadDrive,
+	downloadPdf,
 	EXT,
 	isNative,
 	linksInExport,
-	IMAGES_DIR,
 	listFolder,
 	officeFingerprint,
 	parseDriveUrl,
+	type DriveKind,
 	type DriveRef,
 	type FolderEntry,
 } from "./drive.ts";
@@ -51,21 +55,22 @@ const stem = (name: string) => name.replace(/\.[^.]+$/, "");
 
 /**
  * Files linked from inside a synced file (a Doc's links, a deck's hyperlinks and speaker
- * notes) go next to it in `<name>.attachments/`, like a Schoology item's. `bytes` null
- * means the file wasn't re-exported this run: keep what was synced from it last time.
+ * notes) go next to it in `<name>.attachments/`, like a Schoology item's. `from` is what
+ * was downloaded (its name says how to read it); null means the file wasn't re-exported
+ * this run: keep what was synced from it last time.
  */
 const syncLinkedFrom = async (
 	ctx: DriveContext,
 	ref: DriveRef,
 	dir: string,
 	name: string,
-	bytes: Uint8Array | null,
+	from: { name: string; bytes: Uint8Array } | null,
 ) => {
 	const sub = `${dir}/${stem(name)}.attachments`;
 	const chain = ctx.chain ?? new Set<string>();
-	if (!bytes || chain.size >= MAX_LINK_DEPTH) return ctx.store.keep(sub);
+	if (!from || chain.size >= MAX_LINK_DEPTH) return ctx.store.keep(sub);
 	const refs = new Map<string, DriveRef>();
-	for (const url of linksInExport(name, bytes)) {
+	for (const url of linksInExport(from.name, from.bytes)) {
 		const r = parseDriveUrl(url);
 		if (r && r.id !== ref.id && !chain.has(r.id)) refs.set(r.id, r);
 	}
@@ -100,7 +105,14 @@ const checkedAt = async (store: Store, rel: string) =>
 const markChecked = (store: Store, rel: string) =>
 	lutimes(store.abs(rel), new Date(), new Date()).catch(() => {});
 
-/** fetch + link one file; returns the name it ended up under, or null */
+/** the name a file has in the archive, from its title in Drive */
+const archivedName = (kind: DriveKind, title: string) => {
+	if (kind === "file") return isDocument(title) ? mdName(title) : title;
+	const ext = EXT[kind] ?? "";
+	return `${title}${ext && !title.endsWith(ext) ? ext : ""}`;
+};
+
+/** fetch + archive one file; returns the name it ended up under, or null */
 const syncFile = async (
 	ctx: DriveContext,
 	ref: DriveRef,
@@ -109,15 +121,12 @@ const syncFile = async (
 	opts: { previous?: string; title?: string; modified?: string },
 ): Promise<string | null> => {
 	const { store, google } = ctx;
-	// the name we'd use without downloading: last run's, or the listing title (a Doc can be
-	// `Title.md` or, if it's only images, a `Title/` directory)
-	const ext = EXT[ref.kind] ?? "";
+	// the name we'd use without downloading: last run's, or the listing title (an upload
+	// archived before documents became markdown is still `Title.pdf`)
 	const candidates = opts.previous
 		? [opts.previous]
 		: opts.title
-			? ref.kind === "document"
-				? [`${opts.title}.md`, opts.title]
-				: [`${opts.title}${ext && !opts.title.endsWith(ext) ? ext : ""}`]
+			? [...new Set([archivedName(ref.kind, opts.title), opts.title])]
 			: [];
 	let guess: string | undefined;
 	let checked: number | undefined;
@@ -136,6 +145,19 @@ const syncFile = async (
 		(!isNative(ref.kind) ||
 			(Date.now() - checked < RECHECK_MS && (listingTime(opts.modified) ?? 0) <= checked));
 	if (guess && checked !== undefined && (fresh || !google) && name.claim(guess)) {
+		if (ref.kind === "file" && isDocument(guess) && !guess.endsWith(".md")) {
+			// an upload archived as a plain file before documents became markdown: convert it
+			const sha = await store.readLinkTarget(`${dir}/${guess}`);
+			const bytes = sha && (await store.readBlob(sha));
+			if (bytes) {
+				const final = (await archiveFile(store, `${dir}/${guess}`, bytes, { type: ref.kind, id: ref.id }))
+					.split("/")
+					.pop()!;
+				await markChecked(store, `${dir}/${final}`);
+				await syncLinkedFrom(ctx, ref, dir, final, { name: guess, bytes });
+				return final;
+			}
+		}
 		await keepAll(guess);
 		return guess;
 	}
@@ -157,40 +179,42 @@ const syncFile = async (
 		return null; // no access, or nothing to download (Forms)
 	}
 
-	// a Doc's images, numbered in document order, into `sub`
-	const linkImages = async (sub: string) => {
-		let changed = 0;
-		for (const img of got.images ?? []) {
-			const at = `${sub}/${img.name}`;
-			const was = await store.readLinkTarget(at);
-			const blob = await store.blob(img.bytes);
-			await store.link(at, blob);
-			if (was !== blob.sha256) changed++;
+	const dot = got.name.lastIndexOf(".");
+	if (got.doc) {
+		// a Doc or deck: markdown, images, and a PDF export when it changed
+		const final = name(dot > 0 ? got.name.slice(0, dot) : got.name, ".md");
+		const changed = await saveDocument(
+			store,
+			`${dir}/${final}`,
+			{ type: ref.kind, id: ref.id },
+			got.doc,
+			() => downloadPdf(google, ref),
+		);
+		if (changed) {
+			stats.downloads++;
+			stats.downloadedBytes += got.bytes.byteLength;
+			log(`  ↓ ${final} (Drive${guess === final && checked !== undefined ? ", changed" : ""})`);
 		}
-		return changed;
-	};
-	if (got.imagesOnly) {
-		// a Doc that's just images (scans, screenshots) is archived as just its images
-		const final = name(stem(got.name));
-		const changed = await linkImages(`${dir}/${final}`);
-		if (changed)
-			log(
-				`  ↓ ${final}/ (${got.images!.length} images from a Doc${changed < got.images!.length ? `, ${changed} changed` : ""})`,
-			);
 		await markChecked(store, `${dir}/${final}`);
+		await syncLinkedFrom(ctx, ref, dir, final, got);
 		return final;
 	}
 
-	const dot = got.name.lastIndexOf(".");
-	const final = dot > 0 ? name(got.name.slice(0, dot), got.name.slice(dot)) : name(got.name);
-	const rel = `${dir}/${final}`;
-	if (got.images?.length) {
-		await linkImages(`${dir}/${stem(final)}.images`);
-		const imagesDir = encodeURI(`${stem(final)}.images`)
-			.replace(/\(/g, "%28")
-			.replace(/\)/g, "%29");
-		got.bytes = Buffer.from(Buffer.from(got.bytes).toString("utf8").replaceAll(IMAGES_DIR, imagesDir));
+	const named = dot > 0 ? name(got.name.slice(0, dot), got.name.slice(dot)) : name(got.name);
+	if (ref.kind === "file" && isDocument(named)) {
+		// an uploaded PDF/Word/PowerPoint file (fetched once, like every upload)
+		stats.downloads++;
+		stats.downloadedBytes += got.bytes.byteLength;
+		log(`  ↓ ${named} (Drive)`);
+		const final = (await archiveFile(store, `${dir}/${named}`, got.bytes, { type: ref.kind, id: ref.id }))
+			.split("/")
+			.pop()!;
+		await markChecked(store, `${dir}/${final}`);
+		await syncLinkedFrom(ctx, ref, dir, final, { name: named, bytes: got.bytes });
+		return final;
 	}
+	const final = named;
+	const rel = `${dir}/${final}`;
 	const before = await store.readLinkTarget(rel);
 	// Office exports aren't byte-stable (Slides renumbers images every time): if the content
 	// matches what's archived, keep the archived copy so nothing changes
@@ -199,7 +223,7 @@ const syncFile = async (
 		if (old && officeFingerprint(old) === officeFingerprint(got.bytes)) {
 			await store.link(rel, before);
 			await markChecked(store, rel);
-			await syncLinkedFrom(ctx, ref, dir, final, got.bytes);
+			await syncLinkedFrom(ctx, ref, dir, final, got);
 			return final;
 		}
 	}
@@ -211,7 +235,7 @@ const syncFile = async (
 		log(`  ↓ ${final} (Drive${before ? ", changed" : ""})`);
 	}
 	await markChecked(store, rel);
-	await syncLinkedFrom(ctx, ref, dir, final, got.bytes);
+	await syncLinkedFrom(ctx, ref, dir, final, got);
 	return final;
 };
 

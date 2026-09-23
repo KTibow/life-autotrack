@@ -15,7 +15,10 @@ cd life && git init && cd ..
 cd life-autotrack && pnpm install && cp .env.example .env   # then fill in .env
 ```
 
-Node ≥ 24 (TypeScript runs natively, with no build step). Then cron it yourself, e.g.:
+Node ≥ 24 (TypeScript runs natively, with no build step) and [uv](https://docs.astral.sh/uv/)
+(documents become markdown with `uvx markitdown`). LibreOffice (`soffice`) is optional: with
+it, Word/PowerPoint uploads also get a PDF and old `.doc`/`.ppt` files can be read. Then
+cron it yourself, e.g.:
 
 ```cron
 */30 6-22 * * *  cd ~/life-autotrack && pnpm -s schoology
@@ -44,11 +47,11 @@ life/
     2026-2027/s1-p3-us-history/          <term>-p<period>-<course>, parsed from the section title
       section.json                         ids, titles, grading period dates
       materials/Unit 1/HW 1.md             the materials tree as folders; items are markdown
-      materials/Unit 1/HW 1.attachments/   with fields as frontmatter; files are symlinks,
-                                           incl. linked Google Docs (.md), Sheets (.xlsx),
-                                           Slides (.pdf) and whole linked Drive folders
+      materials/Unit 1/HW 1.attachments/   with fields as frontmatter; documents as markdown,
+                                           other files as symlinks, incl. linked Google Docs
+                                           and Slides (.md), Sheets (.xlsx) and whole Drive folders
       materials/Unit 1/HW 1.submissions/   your own submitted files
-      materials/Unit 1/Syllabus.pdf        a document that is just a file
+      materials/Unit 1/Syllabus.md         a document that is just a file
       updates/2026-09-22 14-05.md  events/2026-10-01 Field trip.md
   studentvue/
     grades/2026-2027/0-s1-mid-term/p3-us-history.json   one file per class per reporting period
@@ -67,6 +70,13 @@ life/
 - **Laid out like the source.** `tree life/schoology` looks like the website: courses
   you can find with one `ls`, folders and items by their titles. Every markdown file's
   frontmatter carries the source's `type` and `id`. Grades live only in StudentVUE.
+- **Documents are markdown.** Google Docs and Slides, and uploaded PDF, Word and
+  PowerPoint files, are each one `<name>.md` (text, tables, speaker notes) with their
+  images in `<name>.images/`, full size, in document order. The frontmatter points into
+  `blobs/` for the rest: `pdf` (the PDF: the upload itself, Google's export, or
+  LibreOffice's print of a Word/PowerPoint file) and, for other uploads, `source` (the
+  file as uploaded, named `file`). A Google file's PDF is only re-fetched when its text
+  or images change. Anything that can't be converted is kept as the file it is.
 - **Files have many names.** Bytes live once in `blobs/` (sha256). Each place a file
   appears gets a relative symlink with a human name; those links are also the download
   cache (a moved item's files are recognized by name and size, not refetched). `find -lname '*<sha>'` gives every name a file has had. Blobs are marked
@@ -97,11 +107,10 @@ cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
 - Links inside those files (a Doc's links, a deck's hyperlinks and speaker notes, a
   Sheet's cells) are followed too, into `<file>.attachments/`, up to
   `DRIVE_LINK_DEPTH` hops.
-- Docs → `.md` (all tabs) with their images, full resolution and in document order, in
-  `<doc>.images/`; a Doc that's only images (a scan, screenshots) becomes just a
-  `<doc>/` folder of `01.png, 02.png, …`.
-- Sheets → `.xlsx`, Slides → `.pptx` (keeps speaker notes), Drawings → `.png`, uploads as
-  uploaded, folders as directories. Exports are normalized so an unchanged file
+- Docs → `.md` (all tabs, from the HTML export so images are full resolution), Slides →
+  `.md` (from the `.pptx`, with speaker notes), each with a PDF export (see above).
+- Sheets → `.xlsx`, Drawings → `.png`, uploads as uploaded (documents as markdown),
+  folders as directories. Exports are normalized so an unchanged file
   re-exports to identical bytes; Google-native files are rechecked when their folder
   says they changed, or every `DRIVE_RECHECK_HOURS`.
 

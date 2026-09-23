@@ -7,12 +7,14 @@
  *       Unit 1/
  *         Notes.md                            a page: body as markdown, fields as frontmatter
  *         HW 1.md                             an assignment (type, id, due, points, …)
- *         HW 1.attachments/worksheet.pdf      → symlink into blobs/
+ *         HW 1.attachments/worksheet.md       a PDF/Word/PowerPoint file, as markdown (its
+ *                                             PDF and upload in blobs/, see lib/document.ts)
+ *         HW 1.attachments/data.xlsx          any other file → symlink into blobs/
  *         HW 1.attachments/Essay prompt.md    a linked Google Doc (exported), or a linked
  *                                             Drive folder mirrored as a directory
- *         HW 1.submissions/2026-09-20 14-05 essay.docx   your own submitted files
+ *         HW 1.submissions/2026-09-20 14-05 essay.md     your own submitted files
  *         Discussion.md  Discussion.comments.json
- *         Syllabus.pdf                        a document that is just one file → symlink
+ *         Syllabus.md                         a document that is just one file
  *     updates/2026-09-22 14-05.md             (+ .attachments/, .comments.json)
  *     events/2026-10-01 Field trip.md
  *
@@ -158,6 +160,7 @@ const archiveSection = async (
 			rel,
 			async () => (file.download_path ? await sc.download(file.download_path) : null),
 			known.get(`${name}\0${size}`),
+			{ type: "file", id: file.id },
 		);
 	};
 	/**

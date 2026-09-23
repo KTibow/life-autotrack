@@ -28,8 +28,10 @@ import {
 } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { formatDoc, parseDoc } from "./doc.ts";
+import { isDocument, mdName } from "./document.ts";
 
 export type BlobRef = { sha256: string; size: number; path: string };
+const BLOB_PATH = /^blobs\/[0-9a-f]{2}\/[0-9a-f]{64}$/;
 
 export class Store {
 	readonly life: string;
@@ -120,6 +122,13 @@ export class Store {
 		return { sha256, size: data.byteLength, path: rel };
 	}
 
+	/** reference an existing repo-relative blob path (e.g. from frontmatter); false if it's not on disk */
+	useBlob(path: string) {
+		if (!BLOB_PATH.test(path) || !existsSync(join(this.life, path))) return false;
+		this.blobs.add(path);
+		return true;
+	}
+
 	async #ensureBlobAttributes() {
 		const rel = "blobs/.gitattributes";
 		const full = join(this.life, rel);
@@ -155,6 +164,10 @@ export class Store {
 			if (st.isSymbolicLink()) {
 				const target = resolve(dirname(full), await readlink(full));
 				if (target.startsWith(join(this.life, "blobs") + sep)) this.blobs.add(this.#repoRel(target));
+			} else if (full.endsWith(".md")) {
+				// blobs a document's frontmatter points at (its PDF, its uploaded source)
+				const { meta } = parseDoc(await readFile(full, "utf8"));
+				for (const v of Object.values(meta)) if (typeof v === "string") this.useBlob(v);
 			}
 		};
 		await walk(this.abs(rel));
@@ -236,20 +249,24 @@ export const safeName = (name: string, maxBytes = 150): string => {
 	return stem + "…" + ext;
 };
 
-/** hands out unique, filesystem-safe names within one directory, in first-come order */
+/**
+ * hands out unique, filesystem-safe names within one directory, in first-come order.
+ * Documents are archived as `<stem>.md` (see document.ts), so `a.pdf` and `a.docx` clash.
+ */
 export const namer = () => {
 	const taken = new Set<string>();
+	const key = (name: string) => (isDocument(name) ? mdName(name) : name).toLowerCase();
 	const fn = (base: string, ext = "") => {
 		const stem = safeName(base || "untitled", 140);
 		let name = stem + ext;
-		for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${stem} (${n})${ext}`;
-		taken.add(name.toLowerCase());
+		for (let n = 2; taken.has(key(name)); n++) name = `${stem} (${n})${ext}`;
+		taken.add(key(name));
 		return name;
 	};
 	/** claim an exact name already chosen earlier (e.g. kept from the last run) */
 	fn.claim = (name: string) => {
-		if (taken.has(name.toLowerCase())) return false;
-		taken.add(name.toLowerCase());
+		if (taken.has(key(name))) return false;
+		taken.add(key(name));
 		return true;
 	};
 	return fn;
