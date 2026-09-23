@@ -267,7 +267,11 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 			await pool(imgs, 3, async (src, i) => {
 				const n = String(i + 1).padStart(width, "0");
 				let error: unknown;
-				for (const candidate of imageCandidates(src)) {
+				const kept = prevList.length === imgs.length ? prevList[i] : null;
+				for (const [ci, candidate] of imageCandidates(src).entries()) {
+					// only the best source may replace what we have: when full size fails and we'd
+					// fall back to the page's smaller copy, keep last run's instead of flapping
+					if (ci > 0 && kept) break;
 					try {
 						const res = await http.get(candidate, root, { maxBytes: MAX_BYTES });
 						const file = `${n}${EXT[(res.headers.get("content-type") ?? "").split(";")[0]] ?? ""}`;
@@ -283,7 +287,6 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 				}
 				// Google sometimes 404s an image one load and serves it the next: if we had it at
 				// this position last run, keep that copy rather than flap
-				const kept = prevList.length === imgs.length && prevList[i];
 				const keptBlob = kept ? await store.readLinkTarget(prevPath(kept)) : null;
 				if (kept && keptBlob) {
 					await store.link(`${imagesRel}/${kept}`, keptBlob);
