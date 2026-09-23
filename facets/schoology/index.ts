@@ -39,7 +39,7 @@ import { createSchoology, SchoologyError, type Schoology } from "./client.ts";
 
 const WEB = `https://${optional("SCHOOLOGY_HOST") ?? "app.schoology.com"}`;
 const MAX_FILE_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
-/** new files downloaded per section per run; the rest wait for later runs (see archiveSection) */
+/** new files downloaded from Schoology per section per run; the rest wait (see archiveSection) */
 const FILES_PER_RUN = Number(optional("SCHOOLOGY_FILES_PER_RUN") ?? 10);
 
 /** 403/404 on a listing means "not available in this section", not a failure */
@@ -176,9 +176,10 @@ const archiveSection = async (
 		}),
 	);
 
-	// Files fill in over runs: every item is written each run (fields, its files' metadata,
-	// a `url` to its page), but at most FILES_PER_RUN new files are downloaded, in the
-	// order the website lists them. A class's few new files a week come right away; a
+	// Schoology's files fill in over runs: every item is written each run (fields, its
+	// files' metadata, a `url` to its page), but at most FILES_PER_RUN new files are
+	// downloaded from Schoology, in the order the website lists them (Drive links are
+	// Google's, and sync as usual). A class's few new files a week come right away; a
 	// club's shelf of 166 PDFs trickles in without hammering Schoology. Your own
 	// submissions don't wait. Files already archived are never refetched, so they don't count.
 	let budget = FILES_PER_RUN;
@@ -240,11 +241,6 @@ const archiveSection = async (
 		);
 		const drive = [];
 		for (const { url, ref } of refs.values()) {
-			// a link never synced before is a new file too
-			if (!previous.get(url) && !take()) {
-				drive.push({ url });
-				continue;
-			}
 			const file = await syncDrive(
 				{ store, files, google: await google() },
 				ref,

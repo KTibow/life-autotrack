@@ -84,7 +84,7 @@ life/
   `binary` so they stay out of text diffs.
 - **Files fill in over runs.** Every item is written every run, with its files' metadata
   and a `url` to its page, but each section downloads at most `SCHOOLOGY_FILES_PER_RUN`
-  new files per run (your own submissions don't wait). A class's few new files a week
+  new files from Schoology per run (your own submissions don't wait; Drive links sync as usual). A class's few new files a week
   arrive right away; a club's shelf of PDFs trickles in without hammering Schoology.
 - **Failures never look like deletions.** Stale files are only pruned from a directory
   whose data was fully fetched in that run. Past-term sections stay in place.
