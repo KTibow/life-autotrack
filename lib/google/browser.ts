@@ -17,7 +17,8 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { closeSync, openSync } from "node:fs";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { optional } from "../env.ts";
 import { sleep } from "../http.ts";
@@ -66,8 +67,12 @@ const running = async (profile: string): Promise<string | null> => {
 };
 
 const launch = async (profile: string): Promise<string> => {
+	await mkdir(profile, { recursive: true });
 	await rm(join(profile, "DevToolsActivePort"), { force: true });
 	const [cmd, ...args] = (optional("CHROMIUM_COMMAND") ?? "chromium").split(/\s+/);
+	// Chromium's own output goes here, so a failed start can say why
+	const logFile = join(profile, "life-autotrack-chromium.log");
+	const out = openSync(logFile, "w");
 	log(`  starting Chromium (${cmd}) on ${profile}`);
 	const child = spawn(
 		cmd,
@@ -80,16 +85,40 @@ const launch = async (profile: string): Promise<string> => {
 			"--no-default-browser-check",
 			"https://drive.google.com/",
 		],
-		{ detached: true, stdio: "ignore" },
+		{ detached: true, stdio: ["ignore", out, out] },
 	);
-	child.on("error", () => {});
+	closeSync(out);
+	let exited: string | undefined;
+	child.on("error", (e) => (exited = `could not run "${cmd}": ${e.message}`));
+	child.on("exit", (code, signal) => (exited = `exited right away (${signal ?? `code ${code}`})`));
 	child.unref(); // left running on purpose: see the header comment
-	for (let i = 0; i < 60; i++) {
+	for (let i = 0; i < 60 && !exited; i++) {
 		await sleep(500);
 		const ws = await running(profile);
 		if (ws) return ws;
 	}
-	throw new Error("Chromium didn't open its DevTools port (is a display available? DISPLAY in .env?)");
+	const tail = (await readFile(logFile, "utf8").catch(() => ""))
+		.split("\n")
+		.filter((l) => l.trim())
+		.slice(-6)
+		.join("\n    ");
+	const hints = [
+		!process.env.DISPLAY &&
+			!process.env.WAYLAND_DISPLAY &&
+			"no DISPLAY/WAYLAND_DISPLAY in the environment (set DISPLAY=:0 in .env)",
+		existsSync(join(profile, "SingletonLock")) &&
+			"this profile is already open in another Chromium started without the debugging port (close that window)",
+		process.getuid?.() === 0 && "running as root: Chromium needs --no-sandbox in CHROMIUM_COMMAND",
+		/snap|flatpak/.test(cmd + args.join(" ")) &&
+			"sandboxed Chromium: CHROMIUM_PROFILE_DIR must be a path the sandbox can write",
+	].filter(Boolean);
+	throw new Error(
+		[
+			`Chromium didn't open its DevTools port${exited ? ` (${exited})` : " within 30s"}`,
+			...(hints.length ? [`  likely: ${hints.join("; ")}`] : []),
+			...(tail ? [`  its output (${logFile}):\n    ${tail}`] : []),
+		].join("\n"),
+	);
 };
 
 export type Google = {
@@ -140,7 +169,7 @@ export const openGoogle = async (): Promise<Google | null> => {
 			browser.close();
 		}
 	} catch (e) {
-		logWarn(`Google: ${(e as Error).message}; skipping Drive this run`);
+		logWarn(`Google: skipping Drive this run: ${(e as Error).message}`);
 		return null;
 	}
 	log("  Google: session ready");
