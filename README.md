@@ -61,6 +61,9 @@ life/
     schedule/2026-2027.json              terms and their classes
     days/2026-09/2026-09-22.json         timetable for every school day this month and next
     attendance/ calendar/ messages.json student.json documents/   (report cards etc., as .md)
+    subs/2026-09/2026-09-24.json          the school's substitute teachers that day (needs
+                                          STUDENTVUE_SCHOOL_GU; only today is fetchable, so
+                                          past days keep what they got)
   weather/
     days/2026-09/2026-09-24.json         NWS day/night forecast and hourly forecast; past hours
                                          keep their last forecast

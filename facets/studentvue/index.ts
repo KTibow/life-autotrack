@@ -9,6 +9,10 @@
  *                                        this month and next (via the web portal)
  *   attendance/<school year>.json        absences
  *   calendar/<YYYY-MM>.json              school events and no-school days
+ *   subs/<YYYY-MM>/<YYYY-MM-DD>.json     the school's substitute teachers that day, from
+ *                                        Synergy's SubstituteLogin (STUDENTVUE_SCHOOL_GU;
+ *                                        only the current day is fetchable, so a run writes
+ *                                        just today's file and past days are never pruned)
  *   messages.json                        district/school notices
  *   student.json                         grade level, school, homeroom, counselor
  *   documents/<date> <type> - <comment>.md   report cards, transcripts, …: the text, with
@@ -20,8 +24,8 @@
  */
 
 import { rm } from "node:fs/promises";
-import { need } from "../../lib/env.ts";
-import { log, setPhase } from "../../lib/log.ts";
+import { need, optional } from "../../lib/env.ts";
+import { log, setPhase, stats } from "../../lib/log.ts";
 import { compact, pick } from "../../lib/pick.ts";
 import { safeName, slug } from "../../lib/store.ts";
 import { track, type Context } from "../../lib/track.ts";
@@ -196,7 +200,15 @@ const archiveDays = async (ctx: Context, sv: Studentvue) => {
 					...pick(s, ["schoolName", "bellSchedName"]),
 					classes: joinBlocks(
 						s.classes.map((c: any) =>
-							pick(c, ["period", "className", "startTime", "endTime", "roomName", "teacherName", "sectionGU"]),
+							pick(c, [
+								"period",
+								"className",
+								"startTime",
+								"endTime",
+								"roomName",
+								"teacherName",
+								"sectionGU",
+							]),
 						),
 					),
 				}),
@@ -205,6 +217,43 @@ const archiveDays = async (ctx: Context, sv: Studentvue) => {
 	}
 	log(`  timetables: ${schoolDays} school days in ${dates.length} days`);
 	for (const m of months) ctx.store.complete(`days/${m.toLocaleDateString("sv-SE").slice(0, 7)}`);
+};
+
+/**
+ * Today's substitute teachers, from Synergy's SubstituteLogin service — the same
+ * Edupoint host as StudentVUE, minus the `-psv` (ParentVUE & StudentVUE) part. It
+ * needs the school's org-year GUID (STUDENTVUE_SCHOOL_GU, optional) and only ever
+ * answers for the current day, so each run rewrites just today's file and the `subs/`
+ * directory is never marked complete: past days keep what they got. Skipped on
+ * weekends, when the district has no sub list.
+ */
+const archiveSubs = async (ctx: Context, host: string) => {
+	const gu = optional("STUDENTVUE_SCHOOL_GU");
+	if (!gu) return;
+	if ([0, 6].includes(new Date().getDay())) return;
+	const synergy = host.replace(/-psv\./, ".");
+	if (synergy === host) throw new Error(`expected a *-psv.* StudentVUE host, got ${host}`);
+	setPhase("fetching substitutes");
+	stats.requests++;
+	const res = await fetch(`https://${synergy}/Service/SubLogin.asmx/LoadSubs`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ curSchoolOrgYearGU: gu, dn: "" }),
+		signal: AbortSignal.timeout(60_000),
+	});
+	if (!res.ok) throw new Error(`Synergy LoadSubs: HTTP ${res.status}`);
+	const { d }: { d: { Name: string }[] } = await res.json();
+	// "Last, First" → "First Last"; the placeholder row is the dropdown's default
+	const subs = (d ?? [])
+		.map((x) => x?.Name)
+		.filter((x) => x && x !== "Select a substitute...")
+		.map((x) => x.split(", ").reverse().join(" "))
+		.sort();
+	const date = today();
+	const rel = `subs/${date.slice(0, 7)}/${date}.json`;
+	const before: string[] = (await ctx.store.readJson(rel)) ?? [];
+	for (const s of subs.filter((s) => !before.includes(s))) ctx.note(`substitute: ${s}`);
+	await ctx.store.writeJson(rel, subs);
 };
 
 const archiveDocuments = async (ctx: Context, sv: Studentvue) => {
@@ -251,6 +300,11 @@ await track("studentvue", async (ctx) => {
 		await archiveDays(ctx, sv);
 	} catch (e) {
 		ctx.warn(`timetables: ${(e as Error).message}`);
+	}
+	try {
+		await archiveSubs(ctx, need("STUDENTVUE_HOST"));
+	} catch (e) {
+		ctx.warn(`substitutes: ${(e as Error).message}`);
 	}
 
 	setPhase("fetching attendance, calendar, messages, student info");
