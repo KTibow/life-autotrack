@@ -149,6 +149,20 @@ const archiveSchedule = async (ctx: Context, sv: Studentvue) => {
 };
 
 /**
+ * Some schools list a block as back-to-back periods of the same section (01 8:20–9:05,
+ * 02 9:05–9:50); join those into one class (01-02 8:20–9:50).
+ */
+const joinBlocks = (classes: any[]) =>
+	classes.reduce((out: any[], c) => {
+		const prev = out.at(-1);
+		if (prev && c.sectionGU && prev.sectionGU === c.sectionGU && prev.endTime === c.startTime) {
+			prev.period = `${String(prev.period).split("-")[0]}-${c.period}`;
+			prev.endTime = c.endTime;
+		} else out.push({ ...c });
+		return out;
+	}, []);
+
+/**
  * One file per school day for this month and next, from the portal's DayContent (the
  * app's calendar view). The window moves once a month, so new files land in one batch;
  * after that a diff means the timetable itself changed (late start, snow day, …).
@@ -180,8 +194,10 @@ const archiveDays = async (ctx: Context, sv: Studentvue) => {
 			schools.map((s: any) =>
 				compact({
 					...pick(s, ["schoolName", "bellSchedName"]),
-					classes: s.classes.map((c: any) =>
-						pick(c, ["period", "className", "startTime", "endTime", "roomName", "teacherName", "sectionGU"]),
+					classes: joinBlocks(
+						s.classes.map((c: any) =>
+							pick(c, ["period", "className", "startTime", "endTime", "roomName", "teacherName", "sectionGU"]),
+						),
 					),
 				}),
 			),
