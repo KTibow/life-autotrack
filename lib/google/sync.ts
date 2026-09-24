@@ -9,14 +9,16 @@
  *   DRIVE_RECHECK_HOURS otherwise. The last check is the symlink's own mtime: local cache
  *   state that never reaches git. A re-export whose content matches the archived copy
  *   (ignoring Office packing noise, see officeFingerprint) changes nothing.
- * - with no Google session, or on an error, whatever was archived before is kept as is
+ * - with no Google session, or on an error, whatever was archived before is kept as is;
+ *   a link that couldn't be fetched and has nothing archived keeps its whole directory, since
+ *   a failed fetch must never look like a deletion
  * - Docs, decks and uploaded documents (PDF, Word, PowerPoint) become `<title>.md` with
  *   their PDF in the frontmatter (see lib/document.ts)
  * - Drive links inside a synced Doc/Sheet/deck are followed into `<file>.attachments/`,
  *   refreshed whenever that file is re-exported, up to DRIVE_LINK_DEPTH hops
  */
 
-import { lstat, lutimes } from "node:fs/promises";
+import { lstat, lutimes, readdir } from "node:fs/promises";
 import { optional } from "../env.ts";
 import { pool } from "../http.ts";
 import type { Files } from "../files.ts";
@@ -57,7 +59,9 @@ const stem = (name: string) => name.replace(/\.[^.]+$/, "");
  * Files linked from inside a synced file (a Doc's links, a deck's hyperlinks and speaker
  * notes) go next to it in `<name>.attachments/`, like a Schoology item's. `from` is what
  * was downloaded (its name says how to read it); null means the file wasn't re-exported
- * this run: keep what was synced from it last time.
+ * this run: keep what was synced from it last time. Each linked file's name from last run
+ * comes from the `id` in its frontmatter (documents); one that can't be fetched and wasn't
+ * found that way (a plain file, a folder) keeps the whole directory as it is.
  */
 const syncLinkedFrom = async (
 	ctx: DriveContext,
@@ -76,8 +80,17 @@ const syncLinkedFrom = async (
 	}
 	if (!refs.size) return;
 	const inner = { ...ctx, chain: new Set([...chain, ref.id]) };
+	const previous = new Map<string, string>();
+	for (const e of await readdir(ctx.store.abs(sub)).catch(() => [] as string[]))
+		if (e.endsWith(".md")) {
+			const id = (await ctx.store.readDoc(`${sub}/${e}`))?.meta.id;
+			if (id) previous.set(String(id), e);
+		}
 	const names = namer();
-	for (const r of refs.values()) await syncDrive(inner, r, sub, names);
+	let failed = false;
+	for (const r of refs.values())
+		if ((await syncDrive(inner, r, sub, names, previous.get(r.id))) === undefined) failed = true;
+	if (failed) await ctx.store.keep(sub);
 };
 
 /** "6/25/22", "Apr 11", "10:31 AM" (today) → epoch ms, or undefined */
@@ -112,14 +125,14 @@ const archivedName = (kind: DriveKind, title: string) => {
 	return `${title}${ext && !title.endsWith(ext) ? ext : ""}`;
 };
 
-/** fetch + archive one file; returns the name it ended up under, or null */
+/** fetch + archive one file; returns the name it ended up under (see syncDrive) */
 const syncFile = async (
 	ctx: DriveContext,
 	ref: DriveRef,
 	dir: string,
 	name: Namer,
 	opts: { previous?: string; title?: string; modified?: string },
-): Promise<string | null> => {
+): Promise<string | null | undefined> => {
 	const { store, google } = ctx;
 	// the name we'd use without downloading: last run's, or the listing title (an upload
 	// archived before documents became markdown is still `Title.pdf`)
@@ -161,12 +174,13 @@ const syncFile = async (
 		await keepAll(guess);
 		return guess;
 	}
-	if (!google) return null;
+	if (!google) return undefined;
 	const got = await downloadDrive(google, ref, MAX_BYTES).catch((e) => {
 		logWarn(`Drive ${ref.kind} ${ref.id}: ${(e as Error).message}`);
 		return undefined;
 	});
-	if (got === undefined && guess && checked !== undefined && name.claim(guess)) {
+	if (got === undefined) {
+		if (!guess || checked === undefined || !name.claim(guess)) return undefined;
 		await keepAll(guess); // transient failure: keep last run's copy
 		return guess;
 	}
@@ -176,7 +190,7 @@ const syncFile = async (
 			await keepAll(guess);
 			return guess;
 		}
-		return null; // no access, or nothing to download (Forms)
+		return google.anonymous ? undefined : null; // no access, or nothing to download (Forms)
 	}
 
 	const dot = got.name.lastIndexOf(".");
@@ -245,10 +259,11 @@ const syncFolder = async (
 	dir: string,
 	name: Namer,
 	opts: { previous?: string; title?: string; budget: { files: number }; depth: number },
-): Promise<string | null> => {
+): Promise<string | null | undefined> => {
 	const { store, google } = ctx;
 	const keepPrevious = async () => {
-		if (!opts.previous || !store.exists(`${dir}/${opts.previous}`) || !name.claim(opts.previous)) return null;
+		if (!opts.previous || !store.exists(`${dir}/${opts.previous}`) || !name.claim(opts.previous))
+			return undefined;
 		await store.keep(`${dir}/${opts.previous}`);
 		return opts.previous;
 	};
@@ -295,7 +310,8 @@ const syncEntry = async (
 /**
  * Sync a linked Drive file or folder into scope-relative `dir`. `previous` is the name
  * it had there last run (so a signed-out or failing run keeps it). Returns the name it's
- * under now, or null if there's nothing (no access, a Form).
+ * under now, null if there's nothing (no access, a Form), or undefined if it couldn't be
+ * fetched this run and nothing archived was kept in its place.
  */
 export const syncDrive = async (
 	ctx: DriveContext,
@@ -303,7 +319,7 @@ export const syncDrive = async (
 	dir: string,
 	name: Namer,
 	previous?: string,
-): Promise<string | null> => {
+): Promise<string | null | undefined> => {
 	if (ref.kind === "folder") {
 		const budget = { files: MAX_FOLDER_FILES };
 		const result = await syncFolder(ctx, ref.id, dir, name, { previous, budget, depth: 0 });

@@ -287,7 +287,8 @@ const docFromZip = (zip: Uint8Array): Doc | null => {
 
 /**
  * The file's bytes and Drive title, or null when this account can't see it (not shared,
- * deleted) or there's nothing to download (Forms).
+ * deleted) or there's nothing to download (Forms); throws when it couldn't tell (errors,
+ * an expired session).
  */
 export const downloadDrive = async (
 	g: Google,
@@ -297,7 +298,8 @@ export const downloadDrive = async (
 	const url = EXPORTS[ref.kind]?.(ref.id);
 	if (!url) return null;
 	const res = await g.fetch(url, { maxBytes });
-	if (!res) return null;
+	// a signed-in session that lands on a sign-in page has expired: not proof of no access
+	if (!res) throw new Error("Google wants a sign-in");
 	if (res.status === 404 || res.status === 410 || res.status === 403 || res.status === 401) {
 		await res.body?.cancel();
 		return null;
@@ -349,15 +351,17 @@ const decode = (s: string) =>
 		.replace(/&gt;/g, ">")
 		.replace(/&amp;/g, "&");
 
-/** a folder's title and direct children, or null if this account can't see it */
+/** a folder's title and direct children, or null if this account can't see it; throws when it couldn't tell */
 export const listFolder = async (
 	g: Google,
 	id: string,
 ): Promise<{ title: string; entries: FolderEntry[] } | null> => {
 	const res = await g.fetch(`https://drive.google.com/embeddedfolderview?id=${id}`);
-	if (!res || !res.ok) {
-		await res?.body?.cancel();
-		return null;
+	if (!res) throw new Error("Google wants a sign-in");
+	if (!res.ok) {
+		await res.body?.cancel();
+		if ([401, 403, 404, 410].includes(res.status)) return null;
+		throw new Error(`HTTP ${res.status}`);
 	}
 	const html = await res.text();
 	if (!html.includes("flip-entry") && !html.includes("folder-view")) return null;
