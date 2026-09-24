@@ -75,9 +75,16 @@ export const contentOf = (html: string) => {
 		const end = html.toLowerCase().lastIndexOf(`</${tag}>`);
 		return open && open.index < end ? html.slice(open.index, end + tag.length + 3) : null;
 	};
-	const body = element("main") ?? element("article") ?? element("body") ?? html;
-	// whole elements, innermost first so one <nav> inside another goes entirely
-	const furniture = /<(script|style|noscript|template|nav|header|footer|aside|svg)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+	// inside <main>/<article> the site chrome is already excluded, so everything in there is
+	// content — including <header>s, which CMSes use for panel and section titles (Finalsite
+	// wraps every tab panel's h2 in one). nav/header/footer/aside are furniture only in the
+	// <body> fallback, where they're the chrome itself.
+	const scoped = element("main") ?? element("article");
+	const body = scoped ?? element("body") ?? html;
+	const furniture = new RegExp(
+		`<(script|style|noscript|template|svg${scoped ? "" : "|nav|header|footer|aside"})\\b[^>]*>([\\s\\S]*?)<\\/\\1>`,
+		"gi",
+	);
 	let stripped = body;
 	for (;;) {
 		const pass = stripped.replace(furniture, "");
