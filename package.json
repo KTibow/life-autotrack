@@ -6,6 +6,7 @@
 	"scripts": {
 		"schoology": "node facets/schoology/index.ts",
 		"studentvue": "node facets/studentvue/index.ts",
+		"weather": "node facets/weather/index.ts",
 		"sites": "node facets/sites/index.ts",
 		"google:login": "node facets/google-login.ts",
 		"site": "node site/publish.ts",

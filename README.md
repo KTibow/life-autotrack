@@ -22,7 +22,8 @@ cron it yourself, e.g.:
 
 ```cron
 */30 6-22 * * *  cd ~/life-autotrack && pnpm -s schoology
-*/15 6-22 * * *  cd ~/life-autotrack && pnpm -s studentvue
+10 6-22 * * *    cd ~/life-autotrack && pnpm -s studentvue
+20 * * * *       cd ~/life-autotrack && pnpm -s weather
 5,35 6-22 * * *  cd ~/life-autotrack && pnpm -s site
 ```
 
@@ -33,6 +34,7 @@ different facets fetch in parallel but take turns committing.
 | ----------------- | -------------------------------------------------- |
 | `pnpm schoology`  | archive Schoology → `life/schoology/`              |
 | `pnpm studentvue` | archive StudentVUE → `life/studentvue/`            |
+| `pnpm weather`    | archive the NWS forecast → `life/weather/`         |
 | `pnpm site`       | build the site from `life/`, sync it to R2         |
 | `pnpm site:dry`   | build (and diff against R2 if credentials are set) |
 | `pnpm site:dev`   | vite dev server over the current `life/`           |
@@ -59,6 +61,9 @@ life/
     schedule/2026-2027.json              terms and their classes
     days/2026-09/2026-09-22.json         timetable for every school day this month and next
     attendance/ calendar/ messages.json student.json documents/   (report cards etc., as .md)
+  weather/
+    days/2026-09/2026-09-24.json         NWS day/night forecast and hourly forecast; past hours
+                                         keep their last forecast
 ```
 
 - **One copy of everything, trimmed.** Each object is stored once, in the file where
