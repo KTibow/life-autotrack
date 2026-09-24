@@ -160,11 +160,27 @@ const joinBlocks = (classes: any[]) =>
 	classes.reduce((out: any[], c) => {
 		const prev = out.at(-1);
 		if (prev && c.sectionGU && prev.sectionGU === c.sectionGU && prev.endTime === c.startTime) {
-			prev.period = `${String(prev.period).split("-")[0]}-${c.period}`;
+			prev.claimedPeriod = `${String(prev.claimedPeriod).split("-")[0]}-${c.period}`;
 			prev.endTime = c.endTime;
-		} else out.push({ ...c });
+		} else out.push({ ...c, claimedPeriod: c.period });
 		return out;
 	}, []);
+
+/**
+ * The day file's `period` is the timetable's own slot label ("03-04" on a block day) —
+ * a time slot, not the class's place in the 7-period day. Rename it to `claimedPeriod`
+ * and set `period` from the schedule's class list via the section's stable `sectionGU`:
+ * that's the class's real period. Unmatched sections (schedule not yet fetched, new
+ * class) keep the claimed label.
+ */
+const realPeriods = async (ctx: Context, year: string, classes: any[]) => {
+	const byGu = new Map<string, string>();
+	for (const term of (await ctx.store.readJson<any[]>(`schedule/${year}.json`)) ?? [])
+		for (const c of term?.classLists ?? [])
+			if (c.sectionGU && c.period) byGu.set(c.sectionGU, String(c.period));
+	for (const c of classes) c.period = (c.sectionGU && byGu.get(c.sectionGU)) || c.period;
+	return classes;
+};
 
 /**
  * One file per school day for this month and next, from the portal's DayContent (the
@@ -175,6 +191,7 @@ const archiveDays = async (ctx: Context, sv: Studentvue) => {
 	setPhase("fetching timetables");
 	const { service } = await sv.web();
 	const now = new Date();
+	const year = schoolYear(today());
 	const months = [0, 1].map((k) => new Date(now.getFullYear(), now.getMonth() + k, 1));
 	const dates = months.flatMap((m) =>
 		Array.from(
@@ -195,23 +212,29 @@ const archiveDays = async (ctx: Context, sv: Studentvue) => {
 		schoolDays++;
 		await ctx.store.writeJson(
 			`days/${asked.slice(0, 7)}/${asked}.json`,
-			schools.map((s: any) =>
-				compact({
-					...pick(s, ["schoolName", "bellSchedName"]),
-					classes: joinBlocks(
-						s.classes.map((c: any) =>
-							pick(c, [
-								"period",
-								"className",
-								"startTime",
-								"endTime",
-								"roomName",
-								"teacherName",
-								"sectionGU",
-							]),
+			await Promise.all(
+				schools.map(async (s: any) =>
+					compact({
+						...pick(s, ["schoolName", "bellSchedName"]),
+						classes: await realPeriods(
+							ctx,
+							year,
+							joinBlocks(
+								s.classes.map((c: any) =>
+									pick(c, [
+										"period",
+										"className",
+										"startTime",
+										"endTime",
+										"roomName",
+										"teacherName",
+										"sectionGU",
+									]),
+								),
+							),
 						),
-					),
-				}),
+					}),
+				),
 			),
 		);
 	}
