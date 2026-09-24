@@ -8,6 +8,7 @@
 		"studentvue": "node facets/studentvue/index.ts",
 		"weather": "node facets/weather/index.ts",
 		"sites": "node facets/sites/index.ts",
+		"pages": "node facets/pages/index.ts",
 		"google:login": "node facets/google-login.ts",
 		"site": "node site/publish.ts",
 		"site:dry": "node site/publish.ts --dry",

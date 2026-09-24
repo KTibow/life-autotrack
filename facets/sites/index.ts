@@ -17,18 +17,16 @@ import { need, optional } from "../../lib/env.ts";
 import { pool } from "../../lib/http.ts";
 import { log, setPhase, stats } from "../../lib/log.ts";
 import { htmlToMarkdown } from "../../lib/markdown.ts";
+import { EXT, RECHECK_MS, TIMEOUT_MS, decode, embedsToLinks, fetchPage, unslug } from "../../lib/page.ts";
 import { compact } from "../../lib/pick.ts";
 import { namer, safeName } from "../../lib/store.ts";
 import { openGoogle, type Google } from "../../lib/google/browser.ts";
-import { parseDriveUrl, unwrapRedirects, type DriveRef } from "../../lib/google/drive.ts";
+import { driveLinksIn, parseDriveUrl, unwrapRedirects, type DriveRef } from "../../lib/google/drive.ts";
 import { syncDrive } from "../../lib/google/sync.ts";
 import { track, type Context } from "../../lib/track.ts";
 
 const MAX_PAGES = Number(optional("SITES_MAX_PAGES") ?? 300);
 const MAX_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
-// a broken image can hang instead of failing; nothing a Site serves should take longer
-const TIMEOUT_MS = 15_000;
-const RECHECK_MS = Number(optional("DRIVE_RECHECK_HOURS") ?? 12) * 3600_000;
 
 class NeedsSignIn extends Error {}
 
@@ -39,25 +37,10 @@ const fetcher = () => {
 	let session: Promise<Google> | undefined;
 	const google = () => (session ??= openGoogle());
 	const authed = new Set<string>(); // sites (by root) that needed the session
-	const plain = async (url: string, timeoutMs: number): Promise<Response | null> => {
-		let current = new URL(url);
-		for (let hop = 0; hop < 8; hop++) {
-			stats.requests++;
-			const res = await fetch(current, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
-			const location = res.headers.get("location");
-			if (res.status >= 300 && res.status < 400 && location) {
-				await res.body?.cancel();
-				current = new URL(location, current);
-				if (current.hostname === "accounts.google.com") return null;
-				continue;
-			}
-			return res;
-		}
-		throw new Error("too many redirects");
-	};
+	const plain = (url: string) => fetchPage(url, (u) => u.hostname === "accounts.google.com");
 	return {
 		get: async (url: string, root: string, init: { maxBytes?: number } = {}): Promise<Response> => {
-			let res = authed.has(root) ? null : await plain(url, TIMEOUT_MS);
+			let res = authed.has(root) ? null : await plain(url);
 			if (!res) {
 				authed.add(root);
 				const g = await google();
@@ -76,16 +59,6 @@ const fetcher = () => {
 };
 
 // ———————————————————————————————————— reading a Sites page
-
-const decode = (s: string) =>
-	s
-		.replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-		.replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
-		.replace(/&quot;/g, '"')
-		.replace(/&#39;|&apos;/g, "'")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&amp;/g, "&");
 
 /** the site's root URL: sites.google.com/view/<name> or /<domain>/<name>; a custom domain's origin */
 const siteRoot = (url: URL) => {
@@ -136,14 +109,6 @@ const imageKey = (src: string) => src.replace(/=[a-z0-9-]+$/i, "");
  * copied from Docs (/docsubipk/) or proxies (/proxy/) only work as the page had them */
 const imageCandidates = (src: string) => [...new Set([`${imageKey(src)}=s0`, src])];
 
-const EXT: Record<string, string> = {
-	"image/jpeg": ".jpg",
-	"image/png": ".png",
-	"image/gif": ".gif",
-	"image/webp": ".webp",
-	"image/svg+xml": ".svg",
-};
-
 // ———————————————————————————————————— archiving a site
 
 type Page = { url: string; path: string };
@@ -179,7 +144,7 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 		if (!segs.length) segs.push("home");
 		const names = segs.map((seg, i) => {
 			const known = nav.get(`${rootPath}/${segs.slice(0, i + 1).join("/")}`)?.title;
-			return safeName(known || decodeURIComponent(seg).replace(/-/g, " "));
+			return safeName(known || unslug(decodeURIComponent(seg)));
 		});
 		return `${dir}/${names.join("/")}`;
 	};
@@ -218,16 +183,7 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 		const title = nav.get(page.path)?.title || pageTitle(html).page;
 
 		let body = unwrapRedirects(sectionsOf(html)).replace(/<(script|style)\b[\s\S]*?<\/\1>/g, "");
-		// embeds (Docs, Slides, Drive folders, YouTube, Forms, …) become links under their label
-		body = body.replace(
-			/<iframe\b[^>]*?(?:aria-label="([^"]*)")?[^>]*?\b(?:data-src|src)="([^"]+)"[^>]*>(?:<\/iframe>)?/g,
-			(_, label, src) => {
-				// YouTube embeds carry a per-load encrypted embed_config: keep just the video
-				const yt = /youtube(?:-nocookie)?\.com\/embed\/([\w-]{6,})/.exec(src);
-				const href = yt ? `https://www.youtube.com/watch?v=${yt[1]}` : src;
-				return `<p><a href="${href}">${label || "Embedded content"}</a></p>`;
-			},
-		);
+		body = embedsToLinks(body);
 
 		// images the site itself hosts: original size, in page order, next to the page.
 		// Their URLs aren't stable (some are signed per page load, others change over time),
@@ -311,11 +267,13 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 		});
 		const md = htmlToMarkdown(body, "https://sites.google.com");
 
-		// Drive files the page embeds or links, next to it (as for Schoology items)
+		// Drive files the page embeds or links, next to it (as for Schoology items). Read
+		// from the HTML: markdown escapes "_" in URLs, which Drive ids are full of.
 		const refs = new Map<string, { url: string; ref: DriveRef }>();
-		for (const m of md.matchAll(/\]\((https?:\/\/[^)\s]+)\)/g)) {
-			const ref = parseDriveUrl(m[1]);
-			if (ref && !refs.has(ref.id)) refs.set(ref.id, { url: m[1], ref });
+		for (const raw of driveLinksIn(body)) {
+			const url = raw.replace(/&amp;/g, "&");
+			const ref = parseDriveUrl(url);
+			if (ref && !refs.has(ref.id)) refs.set(ref.id, { url, ref });
 		}
 		const drive = [];
 		if (refs.size) {

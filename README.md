@@ -67,6 +67,9 @@ life/
   weather/
     days/2026-09/2026-09-24.json         NWS day/night forecast and hourly forecast; past hours
                                          keep their last forecast
+  pages/
+    example.org/some/page.md             one .md per URL in PAGES, laid out by the site's own
+                                         path; images (and linked Drive files) beside it
 ```
 
 - **One copy of everything, trimmed.** Each object is stored once, in the file where
