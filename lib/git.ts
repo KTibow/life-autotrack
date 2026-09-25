@@ -58,13 +58,15 @@ export type CommitResult = { committed: boolean; changes: string[]; busy?: strin
 
 /**
  * Stage and commit exactly `paths` (repo-relative; a directory covers deletions inside
- * it). `subject` gets change counts appended; `notes` open the body.
+ * it), plus the deletion of `removed` (paths no longer on disk). `subject` gets change
+ * counts appended; `notes` open the body.
  */
 export const commitPaths = async (
 	life: string,
 	paths: string[],
 	subject: string,
 	notes: string[] = [],
+	removed: string[] = [],
 ): Promise<CommitResult> => {
 	const dir = join(life, ".git", "autotrack");
 	const lock = await waitLock(join(dir, "commit.lock"), 10 * 60_000, 30 * 60_000);
@@ -73,13 +75,14 @@ export const commitPaths = async (
 		if (blocker) {
 			return { committed: false, changes: [], busy: blocker };
 		}
-		// a pathspec matching nothing is an error to git; blobs are never deleted, and a
-		// scope dir only vanishes if a human removed it (commit that by hand)
+		// a pathspec matching nothing is an error to git; blobs are only deleted by gc (as
+		// `removed`), and a scope dir only vanishes if a human removed it (commit that by hand)
 		const present = paths.filter((p) => existsSync(join(life, p)));
-		if (!present.length) return { committed: false, changes: [] };
-		const pathspecFile = join(dir, "pathspec");
-		await writeFile(pathspecFile, present.join("\0"));
-		const fromFile = [`--pathspec-from-file=${pathspecFile}`, "--pathspec-file-nul"];
+		if (!present.length && !removed.length) return { committed: false, changes: [] };
+		const pathspec = async (name: string, list: string[]) => {
+			await writeFile(join(dir, name), list.join("\0"));
+			return [`--pathspec-from-file=${join(dir, name)}`, "--pathspec-file-nul"];
+		};
 
 		// the commit's own index: HEAD, plus these paths as they are on disk
 		const index = { GIT_INDEX_FILE: join(dir, "index") };
@@ -88,7 +91,12 @@ export const commitPaths = async (
 			() => false,
 		);
 		await git(life, head ? ["read-tree", "HEAD"] : ["read-tree", "--empty"], undefined, index);
-		await git(life, ["add", "-A", ...fromFile], undefined, index);
+		if (present.length)
+			await git(life, ["add", "-A", ...(await pathspec("pathspec", present))], undefined, index);
+		if (removed.length) {
+			const from = await pathspec("removed", removed);
+			await git(life, ["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", ...from], undefined, index);
+		}
 		const status = await git(
 			life,
 			["diff", "--cached", "--name-status", "-z", "--no-renames"],
@@ -118,7 +126,7 @@ export const commitPaths = async (
 			index,
 		);
 		// the real index: these paths as just committed, anything else staged left alone
-		await git(life, ["reset", "--quiet", ...fromFile]);
+		await git(life, ["reset", "--quiet", ...(await pathspec("pathspec", [...present, ...removed]))]);
 		return { committed: true, changes };
 	} finally {
 		await lock.release();

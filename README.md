@@ -35,6 +35,7 @@ different facets fetch in parallel but take turns committing.
 | `pnpm schoology`  | archive Schoology → `life/schoology/`              |
 | `pnpm studentvue` | archive StudentVUE → `life/studentvue/`            |
 | `pnpm weather`    | archive the NWS forecast → `life/weather/`         |
+| `pnpm gc`         | delete (and commit) blobs and trees nothing uses   |
 | `pnpm site`       | build the site from `life/`, sync it to R2         |
 | `pnpm site:dry`   | build (and diff against R2 if credentials are set) |
 | `pnpm site:dev`   | vite dev server over the current `life/`           |
@@ -98,6 +99,9 @@ life/
   contents live once in `trees/<id>/` (its subfolders are links to their own trees),
   and every place it's linked from gets a symlink named as the folder. It's listed and
   synced once per run however many places link it.
+  Nothing deletes blobs or trees during a run. `pnpm gc` removes the ones nothing in
+  `life/` uses anymore (between runs, with every facet's lock held), and commits that, so
+  they stay in history. `pnpm gc --dry` lists them first.
 - **Files fill in over runs.** Every item is written every run, with its files' metadata
   and a `url` to its page, but each section downloads at most `SCHOOLOGY_FILES_PER_RUN`
   new files from Schoology per run (your own submissions don't wait; Drive links sync as usual). A class's few new files a week
