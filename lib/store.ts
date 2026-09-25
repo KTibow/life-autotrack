@@ -29,7 +29,7 @@ import {
 	symlink,
 	writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { formatDoc, parseDoc } from "./doc.ts";
 import { isDocument, mdName } from "./document.ts";
 
@@ -190,7 +190,15 @@ export class Store {
 			}
 			this.touched.add(this.#repoRel(full));
 			if (st.isSymbolicLink()) {
-				const target = resolve(dirname(full), await readlink(full));
+				let target = resolve(dirname(full), await readlink(full));
+				// a link that ends in a blob's sha but no longer reaches it (moved to another
+				// depth by a version without move's fix below): point it at the blob again
+				const sha = basename(target);
+				const blob = join(this.life, "blobs", sha.slice(0, 2), sha);
+				if (/^[0-9a-f]{64}$/.test(sha) && target !== blob && existsSync(blob) && !existsSync(target)) {
+					await this.#retarget(full, blob);
+					target = blob;
+				}
 				if (target.startsWith(join(this.life, "blobs") + sep)) this.blobs.add(this.#repoRel(target));
 				else if (dirname(target) === this.#trees && !seen.has(target)) {
 					seen.add(target);
@@ -206,12 +214,32 @@ export class Store {
 		await walk(this.abs(rel));
 	}
 
-	/** rename a scope-relative file or directory (git sees the rename in the next commit) */
+	async #retarget(full: string, target: string) {
+		await rm(full, { force: true });
+		await symlink(relative(dirname(full), target), full);
+	}
+
+	/** rename a scope-relative file or directory (git sees the rename in the next commit);
+	 * relative links in it are rewritten to reach the same things from the new place */
 	async move(from: string, to: string) {
 		const [src, dst] = [this.abs(from), this.abs(to)];
 		if (src === dst || !existsSync(src) || existsSync(dst)) return false;
 		await mkdir(dirname(dst), { recursive: true });
 		await rename(src, dst);
+		const fix = async (full: string): Promise<void> => {
+			const st = await lstat(full);
+			if (st.isDirectory()) {
+				for (const name of await readdir(full)) await fix(join(full, name));
+				return;
+			}
+			if (!st.isSymbolicLink()) return;
+			const link = await readlink(full);
+			if (isAbsolute(link)) return;
+			const was = resolve(dirname(join(src, relative(dst, full))), link);
+			const target = was === src || was.startsWith(src + sep) ? join(dst, relative(src, was)) : was;
+			if (relative(dirname(full), target) !== link) await this.#retarget(full, target);
+		};
+		await fix(dst);
 		return true;
 	}
 
