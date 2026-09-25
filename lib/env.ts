@@ -34,3 +34,7 @@ export const need = (name: string): string => {
 };
 
 export const optional = (name: string): string | undefined => process.env[name] || undefined;
+
+/** how often a facet re-fetches what changes in place (Google-native files, page images) */
+export const recheckMs = (facet: string, fallbackHours = 24): number =>
+	Number(optional(`${facet}_RECHECK_HOURS`) ?? fallbackHours) * 3600_000;

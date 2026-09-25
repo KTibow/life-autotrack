@@ -6,8 +6,8 @@
  * - uploads are fetched once; an existing link is trusted
  * - Google-native files (Docs, Sheets, Slides, Drawings) change in place, so they're
  *   re-exported when the folder listing says they changed since our last check, or every
- *   DRIVE_RECHECK_HOURS otherwise. The last check is the symlink's own mtime: local cache
- *   state that never reaches git. A re-export whose content matches the archived copy
+ *   ctx.recheckMs otherwise (the calling facet's <FACET>_RECHECK_HOURS). The last check
+ *   is the symlink's own mtime: local cache state that never reaches git. A re-export whose content matches the archived copy
  *   (ignoring Office packing noise, see officeFingerprint) changes nothing.
  * - with no Google session, or on an error, whatever was archived before is kept as is;
  *   a link that couldn't be fetched and has nothing archived keeps its whole directory, since
@@ -40,7 +40,6 @@ import {
 	type FolderEntry,
 } from "./drive.ts";
 
-const RECHECK_MS = Number(optional("DRIVE_RECHECK_HOURS") ?? 12) * 3600_000;
 const MAX_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
 const MAX_FOLDER_FILES = Number(optional("DRIVE_MAX_FOLDER_FILES") ?? 2000);
 const MAX_LINK_DEPTH = Number(optional("DRIVE_LINK_DEPTH") ?? 2);
@@ -49,6 +48,8 @@ export type DriveContext = {
 	store: Store;
 	files: Files;
 	google: Google | null;
+	/** re-export Google-native files at least this often */
+	recheckMs: number;
 	/** Drive ids on the current chain of links (a doc linking to a doc linking back stops) */
 	chain?: Set<string>;
 };
@@ -156,7 +157,7 @@ const syncFile = async (
 	const fresh =
 		checked !== undefined &&
 		(!isNative(ref.kind) ||
-			(Date.now() - checked < RECHECK_MS && (listingTime(opts.modified) ?? 0) <= checked));
+			(Date.now() - checked < ctx.recheckMs && (listingTime(opts.modified) ?? 0) <= checked));
 	if (guess && checked !== undefined && (fresh || !google) && name.claim(guess)) {
 		if (ref.kind === "file" && isDocument(guess) && !guess.endsWith(".md")) {
 			// an upload archived as a plain file before documents became markdown: convert it

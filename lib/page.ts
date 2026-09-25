@@ -5,13 +5,10 @@
  * under their label, images land next to the page numbered in page order.
  */
 
-import { optional } from "./env.ts";
 import { stats } from "./log.ts";
 
 // a broken image can hang instead of failing; nothing a page serves should take longer
 export const TIMEOUT_MS = 15_000;
-// pages' images are fetched again at most this often (unchanged bytes make no diff)
-export const RECHECK_MS = Number(optional("DRIVE_RECHECK_HOURS") ?? 12) * 3600_000;
 
 /** fetch following redirects manually; `stop` ends the chase with null when a hop says to */
 export const fetchPage = async (

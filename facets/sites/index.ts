@@ -13,11 +13,11 @@
  */
 
 import { lstat, lutimes, readdir } from "node:fs/promises";
-import { need, optional } from "../../lib/env.ts";
+import { need, optional, recheckMs } from "../../lib/env.ts";
 import { pool } from "../../lib/http.ts";
 import { log, setPhase, stats } from "../../lib/log.ts";
 import { htmlToMarkdown } from "../../lib/markdown.ts";
-import { EXT, RECHECK_MS, TIMEOUT_MS, decode, embedsToLinks, fetchPage, unslug } from "../../lib/page.ts";
+import { EXT, TIMEOUT_MS, decode, embedsToLinks, fetchPage, unslug } from "../../lib/page.ts";
 import { compact } from "../../lib/pick.ts";
 import { namer, safeName } from "../../lib/store.ts";
 import { openGoogle, type Google } from "../../lib/google/browser.ts";
@@ -27,6 +27,8 @@ import { track, type Context } from "../../lib/track.ts";
 
 const MAX_PAGES = Number(optional("SITES_MAX_PAGES") ?? 300);
 const MAX_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
+// images and Drive files are fetched again at most this often (unchanged bytes make no diff)
+const RECHECK_MS = recheckMs("SITES", 14 * 24);
 
 class NeedsSignIn extends Error {}
 
@@ -282,7 +284,7 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 			const google = await http.google();
 			for (const { url, ref } of refs.values()) {
 				const file = await syncDrive(
-					{ store, files, google },
+					{ store, files, google, recheckMs: RECHECK_MS },
 					ref,
 					`${rel}.attachments`,
 					names,

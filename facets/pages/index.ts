@@ -8,22 +8,25 @@
  *
  * Config is just URLs: PAGES=https://example.org/a/b,https://… Google Sites are their
  * own facet (GOOGLE_SITES); anything else a browser can read works here. Pages are
- * re-read every run; their images are fetched again only every DRIVE_RECHECK_HOURS
+ * re-read every run; their images are fetched again only every PAGES_RECHECK_HOURS
  * (unchanged bytes are the same blobs, so nothing churns).
  */
 
 import { lstat, lutimes, readdir } from "node:fs/promises";
-import { need } from "../../lib/env.ts";
+import { need, recheckMs } from "../../lib/env.ts";
 import { pool } from "../../lib/http.ts";
 import { counter, log, setPhase, stats } from "../../lib/log.ts";
 import { htmlToMarkdown } from "../../lib/markdown.ts";
-import { EXT, contentOf, decode, embedsToLinks, fetchPage, RECHECK_MS, unslug } from "../../lib/page.ts";
+import { EXT, contentOf, decode, embedsToLinks, fetchPage, unslug } from "../../lib/page.ts";
 import { compact } from "../../lib/pick.ts";
 import { namer, safeName } from "../../lib/store.ts";
 import { openGoogle, type Google } from "../../lib/google/browser.ts";
 import { driveLinksIn, parseDriveUrl, unwrapRedirects, type DriveRef } from "../../lib/google/drive.ts";
 import { syncDrive } from "../../lib/google/sync.ts";
 import { track, type Context } from "../../lib/track.ts";
+
+// images and Drive files are fetched again at most this often (unchanged bytes make no diff)
+const RECHECK_MS = recheckMs("PAGES");
 
 /** the site's directory: its hostname (www. is the same site) */
 const hostDir = (url: URL) => safeName(url.hostname.replace(/^www\./, ""));
@@ -203,7 +206,7 @@ const archivePage = async (ctx: Context, start: URL, google: () => Promise<Googl
 		const names = namer();
 		for (const { url, ref } of refs.values()) {
 			const file = await syncDrive(
-				{ store, files, google: await google() },
+				{ store, files, google: await google(), recheckMs: RECHECK_MS },
 				ref,
 				`${rel}.attachments`,
 				names,

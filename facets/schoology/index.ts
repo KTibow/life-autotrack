@@ -25,7 +25,7 @@
  */
 
 import { readdir } from "node:fs/promises";
-import { need, optional } from "../../lib/env.ts";
+import { need, optional, recheckMs } from "../../lib/env.ts";
 import { pool } from "../../lib/http.ts";
 import { counter, log, mb, setPhase } from "../../lib/log.ts";
 import { htmlToMarkdown } from "../../lib/markdown.ts";
@@ -41,6 +41,7 @@ const WEB = `https://${optional("SCHOOLOGY_HOST") ?? "app.schoology.com"}`;
 const MAX_FILE_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
 /** new files downloaded from Schoology per section per run; the rest wait (see archiveSection) */
 const FILES_PER_RUN = Number(optional("SCHOOLOGY_FILES_PER_RUN") ?? 10);
+const RECHECK_MS = recheckMs("SCHOOLOGY");
 
 /** 403/404 on a listing means "not available in this section", not a failure */
 const orEmpty = async <T>(p: Promise<T[]>): Promise<T[]> => {
@@ -242,7 +243,7 @@ const archiveSection = async (
 		const drive = [];
 		for (const { url, ref } of refs.values()) {
 			const file = await syncDrive(
-				{ store, files, google: await google() },
+				{ store, files, google: await google(), recheckMs: RECHECK_MS },
 				ref,
 				`${base}.attachments`,
 				name,

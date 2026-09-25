@@ -128,7 +128,7 @@ cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
 - Sheets → `.xlsx`, Drawings → `.png`, uploads as uploaded (documents as markdown),
   folders as directories. Exports are normalized so an unchanged file
   re-exports to identical bytes; Google-native files are rechecked when their folder
-  says they changed, or every `DRIVE_RECHECK_HOURS`.
+  says they changed, or every `<FACET>_RECHECK_HOURS` (`SCHOOLOGY_`, `SITES_`, `PAGES_`; default 24, sites 336 = two weeks).
 
 ## Adding a facet
 
