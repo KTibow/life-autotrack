@@ -3,8 +3,11 @@
  *
  * - one commit mutex across all facets (life/.git/autotrack/commit.lock), held only for
  *   the add+commit, so facets fetch in parallel but never race on the index
- * - `git commit --only` with an explicit pathspec (the facet's scope + the blobs it
- *   used), so a human's staged work elsewhere is never swept into a bot commit
+ * - the commit is built in an index of its own (HEAD + the facet's scope and the blobs
+ *   and trees it used), so a human's staged work elsewhere is never swept into a bot
+ *   commit; the real index then catches up on just those paths. (`git commit --only`
+ *   would do this in one step, but gets a directory that became a symlink wrong: it
+ *   commits the symlink's target yet keeps the directory's old files and drops the link.)
  * - pathspecs go through a file, so thousands of blobs can't overflow argv
  * - nothing happens mid-merge/rebase; the files stay on disk for the next run
  */
@@ -22,12 +25,17 @@ const IDENTITY = {
 	GIT_COMMITTER_EMAIL: "life-autotrack@localhost",
 };
 
-export const git = (cwd: string, args: string[], input?: string): Promise<string> =>
+export const git = (
+	cwd: string,
+	args: string[],
+	input?: string,
+	env: Record<string, string> = {},
+): Promise<string> =>
 	new Promise((resolve, reject) => {
 		const child = execFile(
 			"git",
 			args,
-			{ cwd, env: { ...process.env, ...IDENTITY }, maxBuffer: 256 * 1024 * 1024 },
+			{ cwd, env: { ...process.env, ...IDENTITY, ...env }, maxBuffer: 256 * 1024 * 1024 },
 			(error, stdout, stderr) => {
 				if (error) reject(new Error(`git ${args[0]} failed: ${stderr.trim() || error.message}`));
 				else resolve(stdout);
@@ -73,17 +81,20 @@ export const commitPaths = async (
 		await writeFile(pathspecFile, present.join("\0"));
 		const fromFile = [`--pathspec-from-file=${pathspecFile}`, "--pathspec-file-nul"];
 
-		await git(life, ["add", "-A", ...fromFile]);
-		const roots = [...new Set(present.map((p) => p.split("/")[0]))];
-		const status = await git(life, [
-			"diff",
-			"--cached",
-			"--name-status",
-			"-z",
-			"--no-renames",
-			"--",
-			...roots,
-		]);
+		// the commit's own index: HEAD, plus these paths as they are on disk
+		const index = { GIT_INDEX_FILE: join(dir, "index") };
+		const head = await git(life, ["rev-parse", "--verify", "--quiet", "HEAD"]).then(
+			() => true,
+			() => false,
+		);
+		await git(life, head ? ["read-tree", "HEAD"] : ["read-tree", "--empty"], undefined, index);
+		await git(life, ["add", "-A", ...fromFile], undefined, index);
+		const status = await git(
+			life,
+			["diff", "--cached", "--name-status", "-z", "--no-renames"],
+			undefined,
+			index,
+		);
 		const fields = status.split("\0").filter(Boolean);
 		const changes: string[] = [];
 		for (let i = 0; i + 1 < fields.length; i += 2) changes.push(`${fields[i]} ${fields[i + 1]}`);
@@ -102,9 +113,12 @@ export const commitPaths = async (
 		];
 		await git(
 			life,
-			["commit", "--quiet", "--only", "--file=-", ...fromFile],
+			["commit", "--quiet", "--file=-"],
 			`${subject} · ${tally}\n\n${body.join("\n")}\n`,
+			index,
 		);
+		// the real index: these paths as just committed, anything else staged left alone
+		await git(life, ["reset", "--quiet", ...fromFile]);
 		return { committed: true, changes };
 	} finally {
 		await lock.release();
