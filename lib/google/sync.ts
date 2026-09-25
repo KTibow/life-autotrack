@@ -1,6 +1,8 @@
 /**
  * Put what a Drive link points at into an archive directory, named as Drive names it:
- * a file becomes `<title>.<ext>` (→ blob), a folder becomes `<title>/` with its whole tree.
+ * a file becomes `<title>.<ext>` (→ blob), a folder becomes `<title>` (→ trees/<id>/, its
+ * whole tree, where its subfolders are links to their own trees). A folder is listed and
+ * synced once per run however many places link it.
  *
  * What gets fetched when:
  * - uploads are fetched once; an existing link is trusted
@@ -254,6 +256,15 @@ const syncFile = async (
 	return final;
 };
 
+/** each run's folder listings by id (per Store), so a folder linked N times is listed once */
+type Listing = Awaited<ReturnType<typeof listFolder>> | undefined;
+const listings = new WeakMap<Store, Map<string, Promise<Listing>>>();
+
+/**
+ * A folder's contents go in its tree, `trees/<id>/`, shared by every place it's linked
+ * from; `<dir>/<title>` is a symlink to it. The first place a run meets a folder lists it
+ * and syncs the tree; the rest only link it.
+ */
 const syncFolder = async (
 	ctx: DriveContext,
 	id: string,
@@ -269,25 +280,44 @@ const syncFolder = async (
 		return opts.previous;
 	};
 	if (!google) return keepPrevious();
-	const listing = await listFolder(google, id).catch((e) => {
-		logWarn(`Drive folder ${id}: ${(e as Error).message}`);
-		return undefined;
-	});
+	const seen = listings.get(store) ?? new Map<string, Promise<Listing>>();
+	listings.set(store, seen);
+	const first = !seen.has(id);
+	if (first)
+		seen.set(
+			id,
+			listFolder(google, id).catch((e) => {
+				logWarn(`Drive folder ${id}: ${(e as Error).message}`);
+				return undefined;
+			}),
+		);
+	const listing = await seen.get(id)!;
 	if (listing === undefined) return keepPrevious();
 	if (!listing) return google.anonymous ? keepPrevious() : null;
+
+	const tree = store.tree(id);
 	const folderName = name(listing.title || opts.title || id);
-	const sub = `${dir}/${folderName}`;
-	if (opts.previous && opts.previous !== folderName && (await store.move(`${dir}/${opts.previous}`, sub)))
+	const rel = `${dir}/${folderName}`;
+	// archived before trees: the folder's own directory becomes its tree, check times and all
+	for (const old of new Set([opts.previous, folderName]))
+		if (old && (await lstat(store.abs(`${dir}/${old}`)).catch(() => null))?.isDirectory())
+			await store.move(`${dir}/${old}`, tree);
+	if (opts.previous && opts.previous !== folderName && store.exists(`${dir}/${opts.previous}`))
 		log(`  Drive folder renamed: ${opts.previous} → ${folderName}`);
+	await store.linkDir(rel, tree);
+	if (!first) return folderName;
+
 	const inner = namer();
 	// subfolders one at a time (names claimed in listing order), files 4 at a time
 	for (const entry of listing.entries.filter((e) => e.kind === "folder"))
-		await syncEntry(ctx, entry, sub, inner, opts.budget, opts.depth + 1);
+		await syncEntry(ctx, entry, tree, inner, opts.budget, opts.depth + 1);
 	await pool(
 		listing.entries.filter((e) => e.kind !== "folder"),
 		4,
-		(entry) => syncEntry(ctx, entry, sub, inner, opts.budget, opts.depth + 1),
+		(entry) => syncEntry(ctx, entry, tree, inner, opts.budget, opts.depth + 1),
 	);
+	// a tree cut short by DRIVE_MAX_FOLDER_FILES keeps the files it didn't get to
+	if (opts.budget.files >= 0) store.complete(tree);
 	return folderName;
 };
 

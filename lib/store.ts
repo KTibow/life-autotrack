@@ -1,12 +1,15 @@
 /**
  * A facet's view of the life repo: everything it writes lands under life/<scope>/,
- * except content-addressed blobs, which are shared across facets in life/blobs/.
+ * except content-addressed blobs and Drive folder trees, which are shared across facets
+ * in life/blobs/ and life/trees/.
  *
  * - writes are atomic (temp file in .git/autotrack/tmp, then rename) and skipped when
  *   the bytes are unchanged, so a crash never leaves a torn file for git to commit
  * - JSON is pretty-printed with a trailing newline, for line-oriented diffs
  * - blobs live at blobs/<sha256[0:2]>/<sha256>, written once, never deleted; human
  *   names are relative symlinks into them, so one file can carry many names and ids
+ * - trees live at trees/<Drive folder id>/, one per folder however often it's linked;
+ *   every place it appears is a relative symlink to it (see `tree`, `linkDir`)
  * - pruning is opt-in per directory via `complete(dir)`: only a directory whose data
  *   was fully fetched this run loses the files it didn't rewrite. A failed fetch
  *   therefore can never look like a deletion.
@@ -42,22 +45,34 @@ export class Store {
 	/** repo-relative blob paths this run wrote or referenced (committed alongside the scope,
 	 * so a blob left uncommitted by an earlier failed run still lands with its symlink) */
 	readonly blobs = new Set<string>();
+	/** repo-relative tree dirs this run wrote or referenced (committed alongside the scope) */
+	readonly trees = new Set<string>();
 	readonly #completed = new Set<string>();
 	readonly #tmp: string;
+	readonly #trees: string;
 
 	constructor(life: string, scope: string) {
 		this.life = life;
 		this.scope = scope;
 		this.root = join(life, scope);
 		this.#tmp = join(life, ".git", "autotrack", "tmp");
+		this.#trees = join(life, "trees");
 	}
 
-	/** absolute path of a scope-relative path, refusing to escape the scope */
+	/** absolute path of a scope-relative path, refusing to escape the scope (or into a tree) */
 	abs(rel: string) {
 		const full = resolve(this.root, rel);
-		if (full !== this.root && !full.startsWith(this.root + sep))
+		if (full !== this.root && !full.startsWith(this.root + sep) && !full.startsWith(this.#trees + sep))
 			throw new Error(`path escapes scope: ${rel}`);
 		return full;
+	}
+
+	/** the scope-relative path of a Drive folder's tree (`../trees/<id>`), used this run */
+	tree(id: string) {
+		if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`bad tree id: ${id}`);
+		const full = join(this.#trees, id);
+		this.trees.add(this.#repoRel(full));
+		return relative(this.root, full).split(sep).join("/");
 	}
 
 	#repoRel(abs: string) {
@@ -151,8 +166,21 @@ export class Store {
 		await symlink(target, full);
 	}
 
-	/** keep everything under scope-relative `rel` as it is (for data we couldn't refresh) */
+	/** give a directory another name: a relative symlink at scope-relative `rel` to `target` */
+	async linkDir(rel: string, target: string) {
+		const full = this.abs(rel);
+		const to = relative(dirname(full), this.abs(target));
+		this.touched.add(this.#repoRel(full));
+		if ((await readlink(full).catch(() => null)) === to) return;
+		await mkdir(dirname(full), { recursive: true });
+		await rm(full, { force: true, recursive: true });
+		await symlink(to, full);
+	}
+
+	/** keep everything under scope-relative `rel` as it is (for data we couldn't refresh),
+	 * including the trees it links to */
 	async keep(rel: string) {
+		const seen = new Set<string>();
 		const walk = async (full: string): Promise<void> => {
 			const st = await lstat(full).catch(() => null);
 			if (!st) return;
@@ -164,6 +192,11 @@ export class Store {
 			if (st.isSymbolicLink()) {
 				const target = resolve(dirname(full), await readlink(full));
 				if (target.startsWith(join(this.life, "blobs") + sep)) this.blobs.add(this.#repoRel(target));
+				else if (dirname(target) === this.#trees && !seen.has(target)) {
+					seen.add(target);
+					this.trees.add(this.#repoRel(target));
+					await walk(target);
+				}
 			} else if (full.endsWith(".md")) {
 				// blobs a document's frontmatter points at (its PDF, its uploaded source)
 				const { meta } = parseDoc(await readFile(full, "utf8"));

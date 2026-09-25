@@ -3,7 +3,7 @@
  *
  * 1. refuses to run if another copy of this facet is running (exits 0, cron-friendly)
  * 2. hands the facet a Store scoped to life/<name>/ and a Files downloader
- * 3. on success: prunes completed dirs, commits scope + blobs with the facet's notes
+ * 3. on success: prunes completed dirs, commits scope + blobs + trees with the facet's notes
  * 4. on failure: still commits whatever was fully written (never prunes), marks the
  *    commit "(partial)", and exits 1 so cron mail / monitoring notices
  */
@@ -77,7 +77,7 @@ export const track = async (name: string, run: (ctx: Context) => Promise<void>) 
 			...warnings.map((w) => `warning: ${w}`),
 			...(failure ? [`error: ${(failure as Error).message ?? failure}`] : []),
 		];
-		const result = await commitPaths(LIFE_DIR, [name, ...store.blobs], subject, body);
+		const result = await commitPaths(LIFE_DIR, [name, ...store.blobs, ...store.trees], subject, body);
 		const secs = ((Date.now() - started) / 1000).toFixed(1);
 		log(
 			result.busy

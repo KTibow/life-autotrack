@@ -45,6 +45,7 @@ different facets fetch in parallel but take turns committing.
 ```
 life/
   blobs/<ab>/<sha256>                  every downloaded file, content-addressed, stored once
+  trees/<Drive folder id>/             every linked Drive folder's contents, stored once
   schoology/                           one directory per facet ("scope"); facets only write here
     2026-2027/s1-p3-us-history/          <term>-p<period>-<course>, parsed from the section title
     ongoing/robotics-club/               a section whose grading periods span years (clubs)
@@ -52,7 +53,8 @@ life/
       materials/Unit 1/HW 1.md             the materials tree as folders; items are markdown
       materials/Unit 1/HW 1.attachments/   with fields as frontmatter; documents as markdown,
                                            other files as symlinks, incl. linked Google Docs
-                                           and Slides (.md), Sheets (.xlsx) and whole Drive folders
+                                           and Slides (.md), Sheets (.xlsx) and Drive folders
+                                           (a symlink named as the folder, into trees/)
       materials/Unit 1/HW 1.submissions/   your own submitted files
       materials/Unit 1/Syllabus.md         a document that is just a file
       updates/2026-09-22 14-05.md  events/2026-10-01 Field trip.md
@@ -92,7 +94,10 @@ life/
 - **Files have many names.** Bytes live once in `blobs/` (sha256). Each place a file
   appears gets a relative symlink with a human name; those links are also the download
   cache (a moved item's files are recognized by name and size, not refetched). `find -lname '*<sha>'` gives every name a file has had. Blobs are marked
-  `binary` so they stay out of text diffs.
+  `binary` so they stay out of text diffs. Drive folders work the same way: a folder's
+  contents live once in `trees/<id>/` (its subfolders are links to their own trees),
+  and every place it's linked from gets a symlink named as the folder. It's listed and
+  synced once per run however many places link it.
 - **Files fill in over runs.** Every item is written every run, with its files' metadata
   and a `url` to its page, but each section downloads at most `SCHOOLOGY_FILES_PER_RUN`
   new files from Schoology per run (your own submissions don't wait; Drive links sync as usual). A class's few new files a week
@@ -126,7 +131,7 @@ cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
 - Docs → `.md` (all tabs, from the HTML export so images are full resolution), Slides →
   `.md` (from the `.pptx`, with speaker notes), each with a PDF export (see above).
 - Sheets → `.xlsx`, Drawings → `.png`, uploads as uploaded (documents as markdown),
-  folders as directories. Exports are normalized so an unchanged file
+  folders as directories in `trees/` (see above). Exports are normalized so an unchanged file
   re-exports to identical bytes; Google-native files are rechecked when their folder
   says they changed, or every `<FACET>_RECHECK_HOURS` (`SCHOOLOGY_`, `SITES_`, `PAGES_`; default 24, sites 336 = two weeks).
 
