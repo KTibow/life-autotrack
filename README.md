@@ -132,6 +132,9 @@ cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
 - Links inside those files (a Doc's links, a deck's hyperlinks and speaker notes, a
   Sheet's cells) are followed too, into `<file>.attachments/`, up to
   `DRIVE_LINK_DEPTH` hops.
+- `DRIVE_IGNORE` (ids or URLs, comma-separated) skips those folders and files wherever
+  they're linked, including inside other folders; whatever was archived of them is
+  pruned like anything else that's gone.
 - Docs → `.md` (all tabs, from the HTML export so images are full resolution), Slides →
   `.md` (from the `.pptx`, with speaker notes), each with a PDF export (see above).
 - Sheets → `.xlsx`, Drawings → `.png`, uploads as uploaded (documents as markdown),

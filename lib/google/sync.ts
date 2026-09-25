@@ -45,6 +45,14 @@ import {
 const MAX_BYTES = Number(optional("MAX_FILE_MB") ?? 250) * 1024 * 1024;
 const MAX_FOLDER_FILES = Number(optional("DRIVE_MAX_FOLDER_FILES") ?? 2000);
 const MAX_LINK_DEPTH = Number(optional("DRIVE_LINK_DEPTH") ?? 2);
+/** Drive folders and files never archived, wherever they're linked (ids or URLs) */
+const IGNORED = new Set(
+	(optional("DRIVE_IGNORE") ?? "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.map((s) => parseDriveUrl(s)?.id ?? s),
+);
 
 export type DriveContext = {
 	store: Store;
@@ -329,6 +337,7 @@ const syncEntry = async (
 	budget: { files: number },
 	depth: number,
 ) => {
+	if (IGNORED.has(entry.id)) return;
 	if (entry.kind === "folder") {
 		if (depth > 10) return;
 		await syncFolder(ctx, entry.id, dir, name, { previous: entry.title, title: entry.title, budget, depth });
@@ -341,7 +350,7 @@ const syncEntry = async (
 /**
  * Sync a linked Drive file or folder into scope-relative `dir`. `previous` is the name
  * it had there last run (so a signed-out or failing run keeps it). Returns the name it's
- * under now, null if there's nothing (no access, a Form), or undefined if it couldn't be
+ * under now, null if there's nothing (no access, a Form, in DRIVE_IGNORE), or undefined if it couldn't be
  * fetched this run and nothing archived was kept in its place.
  */
 export const syncDrive = async (
@@ -351,6 +360,7 @@ export const syncDrive = async (
 	name: Namer,
 	previous?: string,
 ): Promise<string | null | undefined> => {
+	if (IGNORED.has(ref.id)) return null;
 	if (ref.kind === "folder") {
 		const budget = { files: MAX_FOLDER_FILES };
 		const result = await syncFolder(ctx, ref.id, dir, name, { previous, budget, depth: 0 });
