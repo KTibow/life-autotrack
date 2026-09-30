@@ -14,8 +14,8 @@
  * - with no Google session, or on an error, whatever was archived before is kept as is;
  *   a link that couldn't be fetched and has nothing archived keeps its whole directory, since
  *   a failed fetch must never look like a deletion
- * - Docs, decks and uploaded documents (PDF, Word, PowerPoint) become `<title>.md` with
- *   their PDF in the frontmatter (see lib/document.ts)
+ * - Docs, decks, Sheets and uploaded documents (PDF, Word, PowerPoint, spreadsheets)
+ *   become `<title>.md` with their PDF and/or original in the frontmatter (see lib/document.ts)
  * - Drive links inside a synced Doc/Sheet/deck are followed into `<file>.attachments/`,
  *   refreshed whenever that file is re-exported, up to DRIVE_LINK_DEPTH hops
  */
@@ -167,7 +167,10 @@ const syncFile = async (
 	const fresh =
 		checked !== undefined &&
 		(!isNative(ref.kind) ||
-			(Date.now() - checked < ctx.recheckMs && (listingTime(opts.modified) ?? 0) <= checked));
+			// a Sheet archived as .xlsx before Sheets became markdown is re-exported
+			(guess!.endsWith(EXT[ref.kind]!) &&
+				Date.now() - checked < ctx.recheckMs &&
+				(listingTime(opts.modified) ?? 0) <= checked));
 	if (guess && checked !== undefined && (fresh || !google) && name.claim(guess)) {
 		if (ref.kind === "file" && isDocument(guess) && !guess.endsWith(".md")) {
 			// an upload archived as a plain file before documents became markdown: convert it
@@ -206,14 +209,23 @@ const syncFile = async (
 
 	const dot = got.name.lastIndexOf(".");
 	if (got.doc) {
-		// a Doc or deck: markdown, images, and a PDF export when it changed
+		// a Doc or deck: markdown, images, and a PDF export when it changed; a Sheet:
+		// markdown and its .xlsx
 		const final = name(dot > 0 ? got.name.slice(0, dot) : got.name, ".md");
+		let source: Uint8Array | string | undefined;
+		if (ref.kind === "spreadsheets") {
+			// exports aren't byte-stable: an archived .xlsx with the same content stays
+			const kept: string | undefined = (await store.readDoc(`${dir}/${final}`))?.meta.source;
+			const old = kept && (await store.readBlob(kept.split("/").pop()!));
+			source = old && officeFingerprint(old) === officeFingerprint(got.bytes) ? kept : got.bytes;
+		}
 		const changed = await saveDocument(
 			store,
 			`${dir}/${final}`,
 			{ type: ref.kind, id: ref.id },
 			got.doc,
-			() => downloadPdf(google, ref),
+			ref.kind === "spreadsheets" ? null : () => downloadPdf(google, ref),
+			source,
 		);
 		if (changed) {
 			stats.downloads++;
@@ -227,7 +239,7 @@ const syncFile = async (
 
 	const named = dot > 0 ? name(got.name.slice(0, dot), got.name.slice(dot)) : name(got.name);
 	if (ref.kind === "file" && isDocument(named)) {
-		// an uploaded PDF/Word/PowerPoint file (fetched once, like every upload)
+		// an uploaded PDF/Word/PowerPoint/spreadsheet file (fetched once, like every upload)
 		stats.downloads++;
 		stats.downloadedBytes += got.bytes.byteLength;
 		log(`  ↓ ${named} (Drive)`);

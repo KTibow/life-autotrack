@@ -8,9 +8,9 @@
  *       Unit 1/
  *         Notes.md                            a page: body as markdown, fields as frontmatter
  *         HW 1.md                             an assignment (type, id, due, points, …)
- *         HW 1.attachments/worksheet.md       a PDF/Word/PowerPoint file, as markdown (its
- *                                             PDF and upload in blobs/, see lib/document.ts)
- *         HW 1.attachments/data.xlsx          any other file → symlink into blobs/
+ *         HW 1.attachments/worksheet.md       a PDF/Word/PowerPoint/spreadsheet file, as markdown
+ *                                             (its upload and PDF in blobs/, see lib/document.ts)
+ *         HW 1.attachments/photo.jpg          any other file → symlink into blobs/
  *         HW 1.attachments/Essay prompt.md    a linked Google Doc (exported), or a linked
  *                                             Drive folder mirrored as a directory
  *         HW 1.submissions/2026-09-20 14-05 essay.md     your own submitted files

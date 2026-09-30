@@ -5,9 +5,10 @@
  * size, which catches files a teacher moved to another folder). The same bytes under
  * many names dedupe into one blob by sha256.
  *
- * Documents (PDF, Word, PowerPoint) become markdown with their PDF and source in blobs
- * (see document.ts); the existing `<name>.md` is then the cache. A document archived before
- * that, as a plain link, is converted from its blob without downloading it again.
+ * Documents (PDF, Word, PowerPoint, spreadsheets) become markdown with their source and
+ * PDF in blobs (see document.ts); the existing `<name>.md` is then the cache. A document
+ * archived before that, as a plain link, is converted from its blob without downloading it
+ * again.
  *
  * Sources' files are treated as immutable, so an existing link is never re-verified.
  */

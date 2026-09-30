@@ -17,7 +17,7 @@ cd life-autotrack && pnpm install && cp .env.example .env   # then fill in .env
 
 Node ≥ 24 (TypeScript runs natively, with no build step) and [uv](https://docs.astral.sh/uv/)
 (documents become markdown with `uvx markitdown`). LibreOffice (`soffice`) is optional: with
-it, Word/PowerPoint uploads also get a PDF and old `.doc`/`.ppt` files can be read. Then
+it, Word/PowerPoint uploads also get a PDF and old `.doc`/`.ppt`/`.ods` files can be read. Then
 cron it yourself, e.g.:
 
 ```cron
@@ -53,8 +53,8 @@ life/
       section.json                         ids, titles, grading period dates
       materials/Unit 1/HW 1.md             the materials tree as folders; items are markdown
       materials/Unit 1/HW 1.attachments/   with fields as frontmatter; documents as markdown,
-                                           other files as symlinks, incl. linked Google Docs
-                                           and Slides (.md), Sheets (.xlsx) and Drive folders
+                                           other files as symlinks, incl. linked Google Docs,
+                                           Slides and Sheets (.md) and Drive folders
                                            (a symlink named as the folder, into trees/)
       materials/Unit 1/HW 1.submissions/   your own submitted files
       materials/Unit 1/Syllabus.md         a document that is just a file
@@ -85,13 +85,16 @@ life/
 - **Laid out like the source.** `tree life/schoology` looks like the website: courses
   you can find with one `ls`, folders and items by their titles. Every markdown file's
   frontmatter carries the source's `type`, `id` and `url`. Grades live only in StudentVUE.
-- **Documents are markdown.** Google Docs and Slides, and uploaded PDF, Word and
-  PowerPoint files, are each one `<name>.md` (text, tables, speaker notes) with their
-  images in `<name>.images/`, full size, in document order. The frontmatter points into
-  `blobs/` for the rest: `pdf` (the PDF: the upload itself, Google's export, or
-  LibreOffice's print of a Word/PowerPoint file) and, for other uploads, `source` (the
-  file as uploaded, named `file`). A Google file's PDF is only re-fetched when its text
-  or images change. Anything that can't be converted is kept as the file it is.
+- **Documents are markdown, backed by the original.** Anything with text in it is one
+  `<name>.md` you can grep or hand to an LLM: Google Docs, Slides and Sheets, and uploaded
+  PDF, Word, PowerPoint and spreadsheet (`.xlsx`, `.xls`, `.ods`, `.csv`) files. Text,
+  tables (a sheet is a table under its name), speaker notes; images in `<name>.images/`,
+  full size, in document order. The markdown is a reading copy: the frontmatter points
+  into `blobs/` for the real thing. `source` is the file itself (an upload as uploaded,
+  named `file`; a Sheet's `.xlsx` export) and `pdf` is how it looks on paper, for
+  anything with pages (a PDF upload itself, Google's export of a Doc or deck, or
+  LibreOffice's print of a Word/PowerPoint file). A Google file's PDF is only re-fetched
+  when its text or images change. Anything that can't be converted is kept as the file it is.
 - **Files have many names.** Bytes live once in `blobs/` (sha256). Each place a file
   appears gets a relative symlink with a human name; those links are also the download
   cache (a moved item's files are recognized by name and size, not refetched). `find -lname '*<sha>'` gives every name a file has had. Blobs are marked
@@ -137,7 +140,7 @@ cookies of a real Chromium on a profile of its own (`CHROMIUM_PROFILE_DIR`).
   pruned like anything else that's gone.
 - Docs → `.md` (all tabs, from the HTML export so images are full resolution), Slides →
   `.md` (from the `.pptx`, with speaker notes), each with a PDF export (see above).
-- Sheets → `.xlsx`, Drawings → `.png`, uploads as uploaded (documents as markdown),
+- Sheets → `.md` (from the `.xlsx`, which is kept), Drawings → `.png`, uploads as uploaded (documents as markdown),
   folders as directories in `trees/` (see above). Exports are normalized so an unchanged file
   re-exports to identical bytes; Google-native files are rechecked when their folder
   says they changed, or every `<FACET>_RECHECK_HOURS` (`SCHOOLOGY_`, `SITES_`, `PAGES_`; default 24, sites 336 = two weeks).

@@ -1,15 +1,15 @@
 /**
  * Google Drive through a browser session (see browser.ts), without the Drive API:
  *
- * - Google-native files are exported: Docs and Slides → .md (see lib/document.ts; their PDF
- *   export goes in its frontmatter), Sheets → .xlsx, Drawings → .png. Forms have no export
- *   and are skipped.
+ * - Google-native files are exported: Docs, Slides and Sheets → .md (see lib/document.ts;
+ *   a Doc's or deck's PDF export, a Sheet's .xlsx, goes in its frontmatter), Drawings → .png.
+ *   Forms have no export and are skipped.
  * - Docs come from the HTML zip export, not Google's markdown: that one inlines images as
  *   base64 downscaled to 720px and drops floating images. The zip has the originals; the
  *   markdown is made from its HTML, images go next to it numbered in document order. All
  *   tabs are included (the default export concatenates them).
  * - Slides come from the .pptx export through markitdown (text, tables, speaker notes and
- *   images, slide by slide).
+ *   images, slide by slide), Sheets from the .xlsx export (a table per sheet).
  * - Uploaded files come from drive.usercontent.google.com (confirm=t skips the virus-scan
  *   interstitial on big files).
  * - Folders are listed with embeddedfolderview (ids, types, titles, modified dates).
@@ -75,10 +75,12 @@ const PDF_EXPORTS: Partial<Record<DriveKind, (id: string) => string>> = {
 };
 export const EXT: Partial<Record<DriveKind, string>> = {
 	document: ".md",
-	spreadsheets: ".xlsx",
+	spreadsheets: ".md",
 	presentation: ".md",
 	drawings: ".png",
 };
+/** what decks and Sheets are downloaded as, before they become markdown */
+const OFFICE: Partial<Record<DriveKind, string>> = { presentation: ".pptx", spreadsheets: ".xlsx" };
 /** Google-native kinds change in place, so they're re-exported; uploads are fetched once */
 export const isNative = (kind: DriveKind) => kind in EXT;
 
@@ -248,7 +250,7 @@ export const unwrapRedirects = (html: string) =>
 	});
 
 export type Exported = {
-	/** the file's name in Drive, with the export's extension (.md for a Doc, .pptx for Slides) */
+	/** the file's name in Drive, with the export's extension (.md for a Doc, .pptx/.xlsx for Slides/Sheets) */
 	name: string;
 	/** what was downloaded (for a Doc, its markdown) */
 	bytes: Uint8Array;
@@ -315,15 +317,15 @@ export const downloadDrive = async (
 	}
 	let bytes: Uint8Array = new Uint8Array(await res.arrayBuffer());
 	if (ref.kind === "spreadsheets" || ref.kind === "presentation") bytes = normalizeZip(bytes);
-	const name = filenameOf(res) ?? `${ref.id}${ref.kind === "presentation" ? ".pptx" : (EXT[ref.kind] ?? "")}`;
+	const name = filenameOf(res) ?? `${ref.id}${OFFICE[ref.kind] ?? EXT[ref.kind] ?? ""}`;
 	if (ref.kind === "document") {
 		const doc = docFromZip(bytes);
 		if (!doc) throw new Error("unreadable Docs export");
 		return { name: `${name.replace(/\.zip$/i, "")}.md`, bytes: Buffer.from(doc.body), doc };
 	}
-	// a deck that can't be converted (markitdown unavailable) is kept as the .pptx
-	if (ref.kind === "presentation")
-		return { name, bytes, doc: (await officeToDoc(bytes, ".pptx")) ?? undefined };
+	// a deck or Sheet that can't be converted (markitdown unavailable) is kept as the .pptx/.xlsx
+	const office = OFFICE[ref.kind];
+	if (office) return { name, bytes, doc: (await officeToDoc(bytes, office)) ?? undefined };
 	return { name, bytes };
 };
 

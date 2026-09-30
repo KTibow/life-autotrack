@@ -1,18 +1,23 @@
 /**
- * Documents are archived as markdown: one `<name>.md` per Google Doc or Slides deck, and per
- * uploaded PDF, Word or PowerPoint file, so everything anyone wrote is greppable text.
+ * Anything with text in it is archived as markdown, so everything anyone wrote is
+ * greppable and readable as it is: one `<name>.md` per Google Doc, Slides deck or Sheet,
+ * and per uploaded PDF, Word, PowerPoint or spreadsheet file. The markdown is a reading
+ * copy; the frontmatter points at the original (or the closest thing to it) in blobs/:
  *
  *   Essay prompt.md          the text; frontmatter: type, id, and
- *                              pdf: "blobs/ab/<sha256>"     the document as a PDF
- *                              source: "blobs/cd/<sha256>"  the uploaded file, if it wasn't a PDF
+ *                              source: "blobs/cd/<sha256>"  the file itself: the upload as
+ *                                                           uploaded, a Sheet's .xlsx export
+ *                              pdf: "blobs/ab/<sha256>"     how it looks on paper, for anything
+ *                                                           with pages (not spreadsheets)
  *                              file: "Essay prompt.docx"    the uploaded file's name
  *   Essay prompt.images/     its images, full size, numbered in document order
  *
  * - Google Docs come from their HTML export (see google/drive.ts); everything else goes
- *   through markitdown (`uvx`), which handles PDF, .docx and .pptx (with speaker notes).
- * - PDFs: an uploaded PDF is its own; Google exports one; Word/PowerPoint uploads are
- *   printed by LibreOffice when it's installed (and old .doc/.ppt/.odt need it to be read
- *   at all). Without it, those keep just their source.
+ *   through markitdown (`uvx`): PDF, .docx, .pptx (with speaker notes), and spreadsheets
+ *   (.xlsx, .xls, .csv), a table per sheet.
+ * - PDFs: an uploaded PDF is its own; Google exports one for Docs and
+ *   Slides; Word/PowerPoint uploads are printed by LibreOffice when it's installed (and
+ *   old .doc/.ppt/.odt/.ods need it to be read at all). Without it, those keep just their source.
  * - A re-exported Google file keeps the PDF it has while its text and images are unchanged
  *   (PDF exports aren't byte-stable), so a PDF is only fetched when something changed.
  * - A file that can't be converted (tools missing, a broken file) is linked as it is.
@@ -31,14 +36,17 @@ export const IMAGES_DIR = "\u0001images\u0001";
 
 export type Doc = { body: string; images: { name: string; bytes: Uint8Array }[] };
 
-export const isDocument = (name: string) => /\.(pdf|docx|pptx|doc|ppt|odt|odp|rtf)$/i.test(name);
+export const isDocument = (name: string) =>
+	/\.(pdf|docx|pptx|doc|ppt|odt|odp|rtf|xlsx|xls|ods|csv)$/i.test(name);
+/** a table rather than pages: no PDF, and markitdown's pandas filler is cleaned up */
+const isSpreadsheet = (ext: string) => /^\.(xlsx|xls|ods|csv)$/i.test(ext);
 /** "Syllabus.pdf" → "Syllabus.md" */
 export const mdName = (name: string) => name.replace(/\.[^./]+$/, "") + ".md";
 
 // ———————————————————————————————————— external tools
 
 const MARKITDOWN = (
-	optional("MARKITDOWN_COMMAND") ?? "uvx --quiet --from markitdown[docx,pptx,pdf]==0.1.8 markitdown"
+	optional("MARKITDOWN_COMMAND") ?? "uvx --quiet --from markitdown[docx,pptx,pdf,xlsx,xls]==0.1.8 markitdown"
 ).split(/\s+/);
 const SOFFICE = (optional("SOFFICE_COMMAND") ?? "soffice").split(/\s+/);
 const TIMEOUT_MS = 180_000;
@@ -150,10 +158,18 @@ const splitImages = (md: string): Doc => {
 	return { body: body.replace(/!\[Google Shape;\d+;p\d+\]/g, "![]").trim(), images: [...found.values()] };
 };
 
-/** a .pptx or .docx (or PDF) as markdown, or null if markitdown isn't available */
+/**
+ * markitdown reads spreadsheets with pandas, which writes empty cells as NaN/NaT and
+ * untitled columns as "Unnamed: 3": leave those cells empty
+ */
+const tidyTables = (md: string) =>
+	md.replace(/^\|.*\|$/gm, (row) => row.replace(/(?<=\| )(?:NaN|NaT|Unnamed: \d+)(?= \|)/g, ""));
+
+/** a .pptx, .docx, .xlsx (or PDF, .xls, .csv) as markdown, or null if markitdown isn't available */
 export const officeToDoc = async (bytes: Uint8Array, ext: string): Promise<Doc | null> => {
 	const md = await markitdown(bytes, ext);
-	return md === null ? null : splitImages(md);
+	if (md === null) return null;
+	return splitImages(isSpreadsheet(ext) ? tidyTables(md) : md);
 };
 
 export type Converted = { doc: Doc; pdf: Uint8Array | null; source: Uint8Array | null };
@@ -164,9 +180,10 @@ const MODERN: Record<string, string> = {
 	".rtf": "docx",
 	".ppt": "pptx",
 	".odp": "pptx",
+	".ods": "xlsx",
 };
 
-/** an uploaded document → markdown + PDF, or null if it can't be read */
+/** an uploaded document → markdown + PDF (if it has pages) + itself, or null if it can't be read */
 export const convertFile = async (name: string, bytes: Uint8Array): Promise<Converted | null> => {
 	const ext = /\.[^.]+$/.exec(name)?.[0].toLowerCase() ?? "";
 	if (ext === ".pdf") {
@@ -181,6 +198,7 @@ export const convertFile = async (name: string, bytes: Uint8Array): Promise<Conv
 	}
 	const doc = readable && (await officeToDoc(readable, readableExt));
 	if (!doc) return null;
+	if (isSpreadsheet(ext)) return { doc, pdf: null, source: bytes };
 	const pdf = await soffice(bytes, ext, "pdf").catch((e) => {
 		logWarn(`PDF of ${name}: ${(e as Error).message}`);
 		return null;
@@ -199,7 +217,8 @@ const imagesLink = (rel: string) =>
 /**
  * Write a document to scope-relative `rel` (…/Name.md) with its images next to it. `pdf`
  * is the PDF's bytes, or a function fetching it, called only when the document is new or
- * its text or images changed. Returns whether anything changed.
+ * its text or images changed. `source` is the original's bytes, or the blob path of an
+ * archived copy that's still the same file. Returns whether anything changed.
  */
 export const saveDocument = async (
 	store: Store,
@@ -207,7 +226,7 @@ export const saveDocument = async (
 	meta: Record<string, unknown>,
 	doc: Doc,
 	pdf: Uint8Array | null | (() => Promise<Uint8Array | null>),
-	source?: Uint8Array | null,
+	source?: Uint8Array | string | null,
 ): Promise<boolean> => {
 	let imagesChanged = false;
 	for (const img of doc.images) {
@@ -231,9 +250,13 @@ export const saveDocument = async (
 			if (bytes) pdfPath = (await store.blob(bytes)).path;
 		}
 	} else if (pdf) pdfPath = (await store.blob(pdf)).path;
-	const sourcePath = source ? (await store.blob(source)).path : undefined;
+	let sourcePath: string | undefined;
+	if (typeof source === "string") sourcePath = store.useBlob(source) ? source : undefined;
+	else if (source) sourcePath = (await store.blob(source)).path;
 	await store.writeDoc(rel, { ...meta, source: sourcePath, pdf: pdfPath }, body);
-	return imagesChanged || prev?.body !== body || prev?.meta.pdf !== pdfPath;
+	return (
+		imagesChanged || prev?.body !== body || prev?.meta.pdf !== pdfPath || prev?.meta.source !== sourcePath
+	);
 };
 
 /**
