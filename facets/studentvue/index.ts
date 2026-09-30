@@ -9,10 +9,13 @@
  *                                        this month and next (via the web portal)
  *   attendance/<school year>.json        absences
  *   calendar/<YYYY-MM>.json              school events and no-school days
- *   subs/<YYYY-MM>/<YYYY-MM-DD>.json     the school's substitute teachers that day, from
- *                                        Synergy's SubstituteLogin (STUDENTVUE_SCHOOL_GU;
- *                                        only the current day is fetchable, so a run writes
- *                                        just today's file and past days are never pruned)
+ *   subs/<YYYY-MM>/<YYYY-MM-DD>.json     the teachers who have a sub that day, from the list
+ *                                        substitutes pick from in Synergy's SubstituteLogin
+ *                                        (STUDENTVUE_SCHOOL_GU; only the current day is
+ *                                        fetchable, so a run writes just today's file and
+ *                                        past days are never pruned); split into
+ *                                        yourTeachersWithSubs and otherTeachersWithSubs when
+ *                                        the schedule is there
  *   messages.json                        district/school notices
  *   student.json                         grade level, school, homeroom, counselor
  *   documents/<date> <type> - <comment>.md   report cards, transcripts, …: the text, with
@@ -243,7 +246,8 @@ const archiveDays = async (ctx: Context, sv: Studentvue) => {
 };
 
 /**
- * Today's substitute teachers, from Synergy's SubstituteLogin service — the same
+ * The teachers who have a sub today: the list a substitute picks from in Synergy's
+ * SubstituteLogin service to say who they're subbing for. That's the same
  * Edupoint host as StudentVUE, minus the `-psv` (ParentVUE & StudentVUE) part. It
  * needs the school's org-year GUID (STUDENTVUE_SCHOOL_GU, optional) and only ever
  * answers for the current day, so each run rewrites just today's file and the `subs/`
@@ -267,16 +271,53 @@ const archiveSubs = async (ctx: Context, host: string) => {
 	if (!res.ok) throw new Error(`Synergy LoadSubs: HTTP ${res.status}`);
 	const { d }: { d: { Name: string }[] } = await res.json();
 	// "Last, First" → "First Last"; the placeholder row is the dropdown's default
-	const subs = (d ?? [])
+	const teachers = (d ?? [])
 		.map((x) => x?.Name)
 		.filter((x) => x && x !== "Select a substitute...")
 		.map((x) => x.split(", ").reverse().join(" "))
 		.sort();
 	const date = today();
 	const rel = `subs/${date.slice(0, 7)}/${date}.json`;
-	const before: string[] = (await ctx.store.readJson(rel)) ?? [];
-	for (const s of subs.filter((s) => !before.includes(s))) ctx.note(`substitute: ${s}`);
-	await ctx.store.writeJson(rel, subs);
+	const before = await ctx.store.readJson<string[] | Record<string, string[]>>(rel);
+	const seen = new Set(Array.isArray(before) ? before : Object.values(before ?? {}).flat());
+	for (const t of teachers.filter((t) => !seen.has(t))) ctx.note(`has a sub: ${t}`);
+	// split out the student's own teachers: those are the classes that have a sub today
+	const mine = await myTeachers(ctx);
+	await ctx.store.writeJson(
+		rel,
+		mine.size
+			? {
+					yourTeachersWithSubs: teachers.filter((t) => mine.has(nameKey(t))),
+					otherTeachersWithSubs: teachers.filter((t) => !mine.has(nameKey(t))),
+				}
+			: teachers,
+	);
+};
+
+/** "Last, First" or "First M. Last" → "first last", to compare names across services */
+const nameKey = (name: string) => {
+	const words = name
+		.split(", ")
+		.reverse()
+		.join(" ")
+		.toLowerCase()
+		.replace(/[^a-z\s-]/g, "")
+		.split(/\s+/)
+		.filter(Boolean);
+	return `${words[0] ?? ""} ${words.at(-1) ?? ""}`;
+};
+
+/** the teachers of this term's classes, from the schedule (empty if it wasn't fetched) */
+const myTeachers = async (ctx: Context) => {
+	const terms = (await ctx.store.readJson<any[]>(`schedule/${schoolYear(today())}.json`)) ?? [];
+	const now = terms.filter((t) => isoDate(t.beginDate) <= today() && today() <= isoDate(t.endDate));
+	return new Set(
+		(now.length ? now : terms)
+			.flatMap((t) => t.classLists ?? [])
+			.map((c: any) => c.teacher)
+			.filter(Boolean)
+			.map(nameKey),
+	);
 };
 
 const archiveDocuments = async (ctx: Context, sv: Studentvue) => {
