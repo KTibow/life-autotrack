@@ -12,7 +12,7 @@
  * sites) is fetched with the browser session Drive uses (see lib/google/browser.ts).
  */
 
-import { lstat, lutimes, readdir } from "node:fs/promises";
+import { lstat, lutimes, readFile, readdir, writeFile } from "node:fs/promises";
 import { need, optional, recheckMs } from "../../lib/env.ts";
 import { pool } from "../../lib/http.ts";
 import { log, setPhase, stats } from "../../lib/log.ts";
@@ -177,6 +177,14 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 	let done = 0;
 	const tick = (title: string) => log(`  [${++done} pages] ${title}`);
 	let failed = 0;
+	// nav entries the site still lists but which 404 (the owners removed the pages): the
+	// first time a page turns up dead it warns; after that it's remembered locally and
+	// stays quiet (a permanent 404 shouldn't fail every run — track() exits 1 on warnings)
+	const deadFile = store.abs(`${dir}/.dead-pages.json`);
+	const deadKnown = new Set<string>(
+		JSON.parse(await readFile(deadFile, "utf8").catch(() => "[]")) as string[],
+	);
+	const deadNow = new Set<string>();
 	const archivePage = async (page: Page) => {
 		const html = page.url === start ? first : await (await http.get(page.url, root)).text();
 		for (const m of html.matchAll(/href="([^"]+)"/g)) enqueue(m[1]);
@@ -319,12 +327,19 @@ const archiveSite = async (ctx: Context, http: ReturnType<typeof fetcher>, start
 				archivePage(p).catch((e) => {
 					if (e instanceof NeedsSignIn) throw e;
 					failed++;
-					ctx.warn(`${siteTitle}: ${p.path}: ${(e as Error).message}`);
+					const msg = (e as Error).message;
+					if (/^HTTP 404/.test(msg)) {
+						deadNow.add(p.path);
+						if (!deadKnown.has(p.path)) ctx.warn(`${siteTitle}: ${p.path}: ${msg}`);
+					} else ctx.warn(`${siteTitle}: ${p.path}: ${msg}`);
 				}),
 			),
 		);
 	}
 	log(`  ${siteTitle}: ${queue.length - failed}/${queue.length} pages archived`);
+	const deadList = [...deadNow].sort();
+	if (JSON.stringify(deadList) !== JSON.stringify([...deadKnown].sort()))
+		await writeFile(deadFile, `${JSON.stringify(deadList, null, "\t")}\n`);
 	if (!failed) store.complete(dir);
 };
 

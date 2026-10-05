@@ -19,7 +19,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { closeSync, openSync } from "node:fs";
-import { mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { optional, pathEnv } from "../env.ts";
@@ -96,6 +96,46 @@ const desktopEnv = async (): Promise<Record<string, string>> => {
 	}
 	if (!process.env.DISPLAY && env.XAUTHORITY) env.DISPLAY = ":0";
 	return env;
+};
+
+/**
+ * Cross-process mutex on the Chromium profile: batch runs start several facets at once,
+ * and two connectGoogle()/openWindow() calls on the same profile race — the loser's
+ * Chromium exits at once, and worse, one facet can Browser.close() the shared browser
+ * out from under another that borrowed it (the borrower's websocket then dies silently
+ * and node exits with an unsettled top-level await). Hold the lock for the whole
+ * connect/cookie-read/close window; long fetches afterwards use plain fetch(), so the
+ * hold is brief. Stale locks (crashed run, interactive login gone long) are stolen.
+ */
+const withProfileLock = async <T>(profile: string, fn: () => Promise<T>): Promise<T> => {
+	const lock = join(profile, "life-autotrack.lock");
+	const staleMs = 10 * 60_000;
+	const waitMs = 3 * 60_000;
+	const deadline = Date.now() + waitMs;
+	for (;;) {
+		try {
+			await mkdir(lock);
+			break;
+		} catch {
+			const st = await stat(lock).catch(() => null);
+			if (!st) continue; // vanished; try mkdir again
+			const age = Date.now() - st.mtimeMs;
+			if (age > staleMs) {
+				await rm(lock, { recursive: true, force: true });
+				continue;
+			}
+			if (Date.now() > deadline)
+				throw new Error(
+					`Chromium profile busy: lock held ${Math.round(age / 1000)}s by another facet (${lock})`,
+				);
+			await sleep(500);
+		}
+	}
+	try {
+		return await fn();
+	} finally {
+		await rm(lock, { recursive: true, force: true });
+	}
 };
 
 const launch = async (
@@ -218,55 +258,57 @@ const onSignIn = (urls: string[]) => urls.some((u) => u.startsWith("https://acco
 export const connectGoogle = async ({ interactive = false } = {}): Promise<Connection> => {
 	const profile = pathEnv("CHROMIUM_PROFILE_DIR");
 	if (!profile) return { state: "unconfigured" };
-	const headed = interactive || optional("CHROMIUM_HEADLESS") === "0";
-	let browser: Awaited<ReturnType<typeof cdp>> | undefined;
-	let started = false;
-	try {
-		let ws = await running(profile);
-		if (!ws) {
-			ws = await launch(profile, headed);
-			started = true;
-		}
-		browser = await cdp(ws);
-		let cookies: Cookie[] = (await browser.send("Storage.getCookies")).cookies;
-		if (started) {
-			// let the Drive tab load: it either lands on Drive (session refreshed) or on sign-in
-			for (let i = 0; i < 40; i++) {
-				const urls = await pageUrls(browser);
-				cookies = (await browser.send("Storage.getCookies")).cookies;
-				if ((signedIn(cookies) && onDrive(urls)) || onSignIn(urls)) break;
-				await sleep(500);
+	return withProfileLock(profile, async () => {
+		const headed = interactive || optional("CHROMIUM_HEADLESS") === "0";
+		let browser: Awaited<ReturnType<typeof cdp>> | undefined;
+		let started = false;
+		try {
+			let ws = await running(profile);
+			if (!ws) {
+				ws = await launch(profile, headed);
+				started = true;
 			}
-		}
-		if (!signedIn(cookies) || (started && onSignIn(await pageUrls(browser)))) {
-			if (!interactive) return { state: "signed-out", profile };
-			if (!onSignIn(await pageUrls(browser))) await browser.send("Target.createTarget", { url: SIGN_IN });
-			log(
-				"  waiting for you to sign in to Google in the Chromium window (up to 15 minutes, Ctrl-C to stop)…",
-			);
-			// Ctrl-C shouldn't leave the window behind
-			const b = browser;
-			const stop = () => void b.send("Browser.close").finally(() => process.exit(130));
-			process.once("SIGINT", stop);
-			const deadline = Date.now() + 15 * 60_000;
-			while (Date.now() < deadline) {
-				await sleep(2000);
-				cookies = (await browser.send("Storage.getCookies")).cookies;
-				if (signedIn(cookies)) break;
+			browser = await cdp(ws);
+			let cookies: Cookie[] = (await browser.send("Storage.getCookies")).cookies;
+			if (started) {
+				// let the Drive tab load: it either lands on Drive (session refreshed) or on sign-in
+				for (let i = 0; i < 40; i++) {
+					const urls = await pageUrls(browser);
+					cookies = (await browser.send("Storage.getCookies")).cookies;
+					if ((signedIn(cookies) && onDrive(urls)) || onSignIn(urls)) break;
+					await sleep(500);
+				}
 			}
-			process.off("SIGINT", stop);
-			if (!signedIn(cookies)) return { state: "signed-out", profile };
-			await sleep(2000); // let the post-sign-in redirects finish setting cookies
-			cookies = (await browser.send("Storage.getCookies")).cookies;
+			if (!signedIn(cookies) || (started && onSignIn(await pageUrls(browser)))) {
+				if (!interactive) return { state: "signed-out", profile };
+				if (!onSignIn(await pageUrls(browser))) await browser.send("Target.createTarget", { url: SIGN_IN });
+				log(
+					"  waiting for you to sign in to Google in the Chromium window (up to 15 minutes, Ctrl-C to stop)…",
+				);
+				// Ctrl-C shouldn't leave the window behind
+				const b = browser;
+				const stop = () => void b.send("Browser.close").finally(() => process.exit(130));
+				process.once("SIGINT", stop);
+				const deadline = Date.now() + 15 * 60_000;
+				while (Date.now() < deadline) {
+					await sleep(2000);
+					cookies = (await browser.send("Storage.getCookies")).cookies;
+					if (signedIn(cookies)) break;
+				}
+				process.off("SIGINT", stop);
+				if (!signedIn(cookies)) return { state: "signed-out", profile };
+				await sleep(2000); // let the post-sign-in redirects finish setting cookies
+				cookies = (await browser.send("Storage.getCookies")).cookies;
+			}
+			return { state: "ready", google: session(cookies) };
+		} catch (e) {
+			return { state: "failed", error: (e as Error).message };
+		} finally {
+			// graceful close flushes the refreshed cookies to the profile on disk
+			if (browser && started) await browser.send("Browser.close").catch(() => {});
+			browser?.close();
 		}
-		return { state: "ready", google: session(cookies) };
-	} catch (e) {
-		return { state: "failed", error: (e as Error).message };
-	} finally {
-		// graceful close flushes the refreshed cookies to the profile on disk
-		if (browser && started) await browser.send("Browser.close").catch(() => {});
-		browser?.close();
-	}
+	});
 };
 
 /**
@@ -277,19 +319,21 @@ export const connectGoogle = async ({ interactive = false } = {}): Promise<Conne
 export const openWindow = async (url: string) => {
 	const profile = pathEnv("CHROMIUM_PROFILE_DIR");
 	if (!profile) throw new Error("CHROMIUM_PROFILE_DIR not set (see .env.example)");
-	let ws = await running(profile);
-	const started = !ws;
-	if (!ws) ws = await launch(profile, true, url);
-	const browser = await cdp(ws);
-	const tab = started ? undefined : (await browser.send("Target.createTarget", { url })).targetId;
-	return {
-		urls: () => pageUrls(browser),
-		close: async () => {
-			if (started) await browser.send("Browser.close").catch(() => {});
-			else await browser.send("Target.closeTarget", { targetId: tab }).catch(() => {});
-			browser.close();
-		},
-	};
+	return withProfileLock(profile, async () => {
+		let ws = await running(profile);
+		const started = !ws;
+		if (!ws) ws = await launch(profile, true, url);
+		const browser = await cdp(ws);
+		const tab = started ? undefined : (await browser.send("Target.createTarget", { url })).targetId;
+		return {
+			urls: () => pageUrls(browser),
+			close: async () => {
+				if (started) await browser.send("Browser.close").catch(() => {});
+				else await browser.send("Target.closeTarget", { targetId: tab }).catch(() => {});
+				browser.close();
+			},
+		};
+	});
 };
 
 /**
