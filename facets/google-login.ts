@@ -27,10 +27,10 @@ const res = await c.google.fetch("https://drive.google.com/drive/my-drive");
 await res?.body?.cancel();
 if (!res) {
 	console.log(
-		"The browser is signed in, but Drive still asks for a sign-in with this session. Run `pnpm google:login` again; if it keeps happening, paste the output.",
+		"Chromium looks signed in, but Drive redirected to the sign-in page when its cookies were used outside the window. Run `pnpm google:login` again; if it keeps happening, sign out of Google in that window and sign back in.",
 	);
 	process.exit(1);
 }
 console.log(
-	"Signed in, and Drive works with this session. Tracker runs will use it from here (headless, no window).",
+	"Signed in, and Drive accepts the session. Tracker runs will use it from now on, without opening a window.",
 );
