@@ -107,7 +107,7 @@ const attachments = (a: any) =>
 	});
 
 const FIELDS: Record<string, string[]> = {
-	assignment: ["title", "type", "due", "max_points", "allow_dropbox", "dropbox_locked"],
+	assignment: ["title", "type", "assignment_type", "due", "max_points", "allow_dropbox", "dropbox_locked"],
 	page: ["title", "created"],
 	discussion: ["title", "due", "graded", "max_points"],
 	document: ["title"],
