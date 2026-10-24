@@ -44,13 +44,21 @@ const cdp = async (wsUrl: string) => {
 		pending.get(msg.id)?.(msg);
 		pending.delete(msg.id);
 	};
-	const send = (method: string, params: object = {}) =>
+	// `sessionId` (from Target.attachToTarget with flatten) sends to one page instead of the browser
+	const send = (method: string, params: object = {}, sessionId?: string) =>
 		new Promise<any>((resolve, reject) => {
 			const id = nextId++;
-			pending.set(id, (msg) =>
-				msg.error ? reject(new Error(`${method}: ${msg.error.message}`)) : resolve(msg.result),
-			);
-			ws.send(JSON.stringify({ id, method, params }));
+			// a page mid-navigation can leave a call unanswered; don't hang while holding the lock
+			const timer = setTimeout(() => {
+				pending.delete(id);
+				reject(new Error(`${method}: no answer from Chromium`));
+			}, 30_000);
+			pending.set(id, (msg) => {
+				clearTimeout(timer);
+				if (msg.error) reject(new Error(`${method}: ${msg.error.message}`));
+				else resolve(msg.result);
+			});
+			ws.send(JSON.stringify({ id, method, params, sessionId }));
 		});
 	return { send, close: () => ws.close() };
 };
@@ -237,7 +245,8 @@ const cookieHeader = (cookies: Cookie[], url: URL) =>
 export type Connection =
 	| { state: "ready"; google: Google }
 	| { state: "unconfigured" }
-	| { state: "signed-out"; profile: string }
+	/** `stale`: the profile has a session, but Drive sends it to sign-in */
+	| { state: "signed-out"; profile: string; stale?: boolean }
 	| { state: "failed"; error: string };
 
 const signedIn = (cookies: Cookie[]) =>
@@ -246,14 +255,55 @@ const pageUrls = async (browser: Awaited<ReturnType<typeof cdp>>): Promise<strin
 	(await browser.send("Target.getTargets")).targetInfos
 		.filter((t: any) => t.type === "page")
 		.map((t: any) => String(t.url));
-const onDrive = (urls: string[]) => urls.some((u) => u.startsWith("https://drive.google.com/"));
 const onSignIn = (urls: string[]) => urls.some((u) => u.startsWith("https://accounts.google.com/"));
+
+/**
+ * Wait (up to 20s) for the tab Chromium was started with to finish loading, on Drive (which
+ * refreshes the session's rotating cookies) or a sign-in page. Its URL alone says nothing:
+ * it reads as Drive from the start, before any redirect.
+ */
+const settle = async (browser: Awaited<ReturnType<typeof cdp>>) => {
+	const tab = (await browser.send("Target.getTargets")).targetInfos.find((t: any) => t.type === "page");
+	if (!tab) return;
+	const { sessionId } = await browser.send("Target.attachToTarget", {
+		targetId: tab.targetId,
+		flatten: true,
+	});
+	for (let i = 0; i < 40; i++) {
+		const page = await browser
+			.send(
+				"Runtime.evaluate",
+				{ expression: "[location.host, document.readyState, document.title]", returnByValue: true },
+				sessionId,
+			)
+			.then((r) => r.result.value as [string, string, string])
+			.catch(() => undefined); // mid-navigation
+		if (page) {
+			const [host, state, title] = page;
+			// Drive's "Redirecting..." page is a hop on the way to sign-in (or back)
+			if (state === "complete" && /^(drive|accounts)\.google\.com$/.test(host) && title !== "Redirecting...")
+				return;
+		}
+		await sleep(500);
+	}
+};
+
+/** whether Drive takes these cookies, rather than having the cookie exist */
+const works = async (cookies: Cookie[]) => {
+	if (!signedIn(cookies)) return false;
+	const res = await session([...cookies])
+		.fetch("https://drive.google.com/drive/my-drive", { timeoutMs: 20_000 })
+		.catch(() => null);
+	await res?.body?.cancel();
+	return !!res;
+};
 
 /**
  * Get the profile's Google cookies. Starts Chromium if it isn't running (headless unless
  * `interactive`), waits for its Drive tab to settle so the session gets refreshed, and
- * closes it again if we started it. `interactive` (google:login) opens a window and, when
- * signed out, waits for a person to sign in there.
+ * closes it again if we started it. The session counts only once Drive accepts it.
+ * `interactive` (google:login) opens a window and, when signed out, waits for a person to
+ * sign in there.
  */
 export const connectGoogle = async ({ interactive = false } = {}): Promise<Connection> => {
 	const profile = pathEnv("CHROMIUM_PROFILE_DIR");
@@ -269,18 +319,15 @@ export const connectGoogle = async ({ interactive = false } = {}): Promise<Conne
 				started = true;
 			}
 			browser = await cdp(ws);
+			if (started) await settle(browser);
 			let cookies: Cookie[] = (await browser.send("Storage.getCookies")).cookies;
-			if (started) {
-				// let the Drive tab load: it either lands on Drive (session refreshed) or on sign-in
-				for (let i = 0; i < 40; i++) {
-					const urls = await pageUrls(browser);
-					cookies = (await browser.send("Storage.getCookies")).cookies;
-					if ((signedIn(cookies) && onDrive(urls)) || onSignIn(urls)) break;
-					await sleep(500);
-				}
-			}
-			if (!signedIn(cookies) || (started && onSignIn(await pageUrls(browser)))) {
-				if (!interactive) return { state: "signed-out", profile };
+			if (!(await works(cookies))) {
+				const stale = signedIn(cookies);
+				if (!interactive) return { state: "signed-out", profile, stale };
+				if (stale)
+					log(
+						"  the saved Google session has expired (Drive sends it to sign-in), so it needs a sign-in again",
+					);
 				if (!onSignIn(await pageUrls(browser))) await browser.send("Target.createTarget", { url: SIGN_IN });
 				log(
 					"  waiting for you to sign in to Google in the Chromium window (up to 15 minutes, Ctrl-C to stop)…",
@@ -290,15 +337,14 @@ export const connectGoogle = async ({ interactive = false } = {}): Promise<Conne
 				const stop = () => void b.send("Browser.close").finally(() => process.exit(130));
 				process.once("SIGINT", stop);
 				const deadline = Date.now() + 15 * 60_000;
-				while (Date.now() < deadline) {
+				let ok = false;
+				while (!ok && Date.now() < deadline) {
 					await sleep(2000);
 					cookies = (await browser.send("Storage.getCookies")).cookies;
-					if (signedIn(cookies)) break;
+					ok = await works(cookies);
 				}
 				process.off("SIGINT", stop);
-				if (!signedIn(cookies)) return { state: "signed-out", profile };
-				await sleep(2000); // let the post-sign-in redirects finish setting cookies
-				cookies = (await browser.send("Storage.getCookies")).cookies;
+				if (!ok) return { state: "signed-out", profile, stale };
 			}
 			return { state: "ready", google: session(cookies) };
 		} catch (e) {
@@ -350,7 +396,7 @@ export const openGoogle = async (): Promise<Google> => {
 	if (c.state === "unconfigured") log("  Google: CHROMIUM_PROFILE_DIR not set, public Drive files only");
 	else if (c.state === "signed-out")
 		logWarn(
-			`Google: not signed in, public Drive files only this run. Run \`pnpm google:login\` on the machine to sign in`,
+			`Google: ${c.stale ? "the saved session has expired" : "not signed in"}, public Drive files only this run. Run \`pnpm google:login\` on the machine to sign in`,
 		);
 	else logWarn(`Google: public Drive files only this run: ${c.error}`);
 	return anonymous;
